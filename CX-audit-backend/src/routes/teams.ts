@@ -60,6 +60,7 @@ function defaultRubric(id: Team): TeamRubric {
     description: "",
     criteria: [{ name: "Quality", weight: 100, description: "Overall call quality." }],
     system_prompt: "You are a CX quality auditor. Score the transcript 0-100 against each criterion.",
+    scale_max: 100,
     flag_threshold: 70,
     critical_criterion_threshold: 60,
     updated_at: new Date().toISOString(),

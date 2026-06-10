@@ -1,4 +1,15 @@
-import type { Audit, CriterionScore, Role, Team, TeamRubric, User } from "./cx-data";
+import type {
+  Audit,
+  CriterionScore,
+  PerformanceGranularity,
+  PerformanceResponse,
+  PlatformSettings,
+  RecordingPattern,
+  Role,
+  Team,
+  TeamRubric,
+  User,
+} from "./cx-data";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:4000/api";
 const TOKEN_KEY = "cx_audit_token";
@@ -147,6 +158,66 @@ export function updateTeam(teamId: Team, patch: Partial<TeamRubric>): Promise<Te
     method: "PATCH",
     body: JSON.stringify(patch),
   });
+}
+
+// ---- recording patterns (super_admin) ------------------------------------
+
+export function fetchPatterns(): Promise<RecordingPattern[]> {
+  return request<RecordingPattern[]>("/patterns");
+}
+
+export interface NewPattern {
+  label: string;
+  regex: string;
+  flags?: string;
+  priority?: number;
+  active?: boolean;
+}
+
+export function createPattern(p: NewPattern): Promise<RecordingPattern> {
+  return request<RecordingPattern>("/patterns", { method: "POST", body: JSON.stringify(p) });
+}
+
+export function updatePattern(id: string, patch: Partial<RecordingPattern>): Promise<RecordingPattern> {
+  return request<RecordingPattern>(`/patterns/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+}
+
+export function deletePattern(id: string): Promise<{ ok: boolean }> {
+  return request(`/patterns/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export function testPattern(regex: string, sample: string, flags?: string): Promise<{ matched: boolean; groups: Record<string, string> | null }> {
+  return request("/patterns/test", { method: "POST", body: JSON.stringify({ regex, sample, flags }) });
+}
+
+// ---- performance ---------------------------------------------------------
+
+/** The caller's own performance (own agent for users, own team for admins). */
+export function fetchMyPerformance(granularity: PerformanceGranularity): Promise<PerformanceResponse> {
+  return request<PerformanceResponse>(`/performance/me?granularity=${granularity}`);
+}
+
+/** A specific agent's or team's performance series (RBAC-enforced server-side). */
+export function fetchPerformance(
+  scope: "agent" | "team",
+  id: string,
+  granularity: PerformanceGranularity
+): Promise<PerformanceResponse> {
+  const q = new URLSearchParams({ scope, id, granularity });
+  return request<PerformanceResponse>(`/performance?${q.toString()}`);
+}
+
+// ---- platform settings (models) ------------------------------------------
+
+export function fetchSettings(): Promise<PlatformSettings> {
+  return request<PlatformSettings>("/settings");
+}
+
+export function updateSettings(patch: Partial<Pick<PlatformSettings, "transcription_model" | "audit_model">>): Promise<PlatformSettings> {
+  return request<PlatformSettings>("/settings", { method: "PATCH", body: JSON.stringify(patch) });
 }
 
 export type { CriterionScore };

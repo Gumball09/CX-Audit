@@ -1,24 +1,31 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { type User, canSeeAdmin, roleClass } from "@/lib/cx-data";
-import { AudioWaveform, BookOpen, Crown, LogOut, PhoneCall, Users } from "lucide-react";
+import { AudioWaveform, BookOpen, Crown, LineChart, LogOut, PhoneCall, Regex, Settings, Users } from "lucide-react";
 import { CallAuditsView } from "./CallAuditsView";
 import { AgentRosterView } from "./AgentRosterView";
 import { AuditPromptsView } from "./AuditPromptsView";
+import { PatternsView } from "./PatternsView";
+import { PerformanceView } from "./PerformanceView";
+import { SettingsView } from "./SettingsView";
 import { fetchUsers } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
-type View = "calls" | "users" | "teams";
+type View = "calls" | "performance" | "users" | "teams" | "patterns" | "settings";
 
 const VIEW_LABELS: Record<View, string> = {
   calls: "Call Audits",
+  performance: "Performance",
   users: "User Management",
   teams: "Team Rubrics",
+  patterns: "Recording Patterns",
+  settings: "Settings",
 };
 
 export function DashboardShell({ user, onLogout }: { user: User; onLogout: () => void }) {
   const [view, setView] = useState<View>("calls");
   const admin = canSeeAdmin(user.role);
+  const superAdmin = user.role === "super_admin";
 
   // A small users lookup so audits can show agent names. Admin+ only; the
   // backend scopes this to the caller's team automatically.
@@ -28,10 +35,13 @@ export function DashboardShell({ user, onLogout }: { user: User; onLogout: () =>
     enabled: admin,
   });
 
-  const nav: { id: View; label: string; icon: React.ElementType; admin?: boolean }[] = [
+  const nav: { id: View; label: string; icon: React.ElementType; admin?: boolean; superAdmin?: boolean }[] = [
     { id: "calls", label: "Call Audits", icon: PhoneCall },
+    { id: "performance", label: "Performance", icon: LineChart },
     { id: "users", label: "User Management", icon: Users, admin: true },
     { id: "teams", label: "Team Rubrics", icon: BookOpen, admin: true },
+    { id: "patterns", label: "Recording Patterns", icon: Regex, superAdmin: true },
+    { id: "settings", label: "Settings", icon: Settings, superAdmin: true },
   ];
 
   return (
@@ -44,7 +54,7 @@ export function DashboardShell({ user, onLogout }: { user: User; onLogout: () =>
           <span className="font-mono text-xs tracking-widest text-muted-foreground">CX AUDIT</span>
         </div>
         <nav className="flex-1 py-4">
-          {nav.filter((n) => !n.admin || admin).map((n) => {
+          {nav.filter((n) => (!n.admin || admin) && (!n.superAdmin || superAdmin)).map((n) => {
             const Icon = n.icon;
             const active = view === n.id;
             return (
@@ -91,8 +101,11 @@ export function DashboardShell({ user, onLogout }: { user: User; onLogout: () =>
 
         <main className="flex-1 overflow-auto">
           {view === "calls" && <CallAuditsView user={user} users={users} />}
+          {view === "performance" && <PerformanceView user={user} />}
           {view === "users" && admin && <AgentRosterView user={user} />}
           {view === "teams" && admin && <AuditPromptsView user={user} />}
+          {view === "patterns" && superAdmin && <PatternsView user={user} />}
+          {view === "settings" && superAdmin && <SettingsView user={user} />}
         </main>
       </div>
     </div>

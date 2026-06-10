@@ -9,7 +9,11 @@
  */
 import { putTeam } from "../src/db/teams.js";
 import { putUser, newUserId, getUserByEmail } from "../src/db/users.js";
-import type { TeamRubric, User } from "../src/types.js";
+import { getPattern, putPattern } from "../src/db/patterns.js";
+import { BUILTIN_PATTERN_SOURCE } from "../src/lib/filename.js";
+import type { RecordingPattern, TeamRubric, User } from "../src/types.js";
+
+const BUILTIN_PATTERN_ID = "PAT-builtin";
 
 const SUPER_ADMIN_EMAIL = process.env.SEED_SUPER_ADMIN_EMAIL ?? "shubh.mehrotra@scaler.com";
 const now = () => new Date().toISOString();
@@ -108,11 +112,31 @@ async function seedUser(u: Partial<User> & { email: string; name: string; role: 
   console.log(`✓ user ${user.email} (${user.role}${user.team ? ", " + user.team : ""})`);
 }
 
+async function seedBuiltinPattern() {
+  const existing = await getPattern(BUILTIN_PATTERN_ID);
+  const pattern: RecordingPattern = {
+    pattern_id: BUILTIN_PATTERN_ID,
+    label: "Scaler dialer (built-in)",
+    regex: BUILTIN_PATTERN_SOURCE,
+    flags: "i",
+    priority: 1, // the default — tried first
+    active: true,
+    match_count: existing?.match_count ?? 0, // preserve usage across re-seeds
+    is_builtin: true,
+    created_by: existing?.created_by ?? null,
+    created_at: existing?.created_at ?? now(),
+    updated_at: now(),
+  };
+  await putPattern(pattern);
+  console.log(`✓ recording pattern ${pattern.label}`);
+}
+
 async function main() {
   for (const r of rubrics) {
     await putTeam(r);
     console.log(`✓ rubric ${r.team_id}`);
   }
+  await seedBuiltinPattern();
   await seedUser({ email: SUPER_ADMIN_EMAIL, name: "Platform Owner", role: "super_admin" });
   for (const a of sampleAgents) await seedUser({ ...a, role: "user" });
   console.log("\nSeed complete.");

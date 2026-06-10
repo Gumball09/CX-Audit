@@ -28,16 +28,28 @@ export interface User {
   updated_at: string;
 }
 
-/** One scoring dimension within a team rubric. */
+/**
+ * One scoring dimension within a team rubric.
+ *
+ * The rubric is intentionally flexible (not a fixed template): `weight` is a
+ * *relative* weight that is normalized at scoring time, so admins are not forced
+ * to make weights sum to exactly 100. `critical_threshold` optionally overrides
+ * the rubric-wide critical threshold for this one dimension, and `guidance`
+ * carries free-form extra instruction/examples for the auditor beyond the short
+ * `description`.
+ */
 export interface Criterion {
   name: string;
-  weight: number;       // 0-100, weights across a rubric must sum to 100
-  description: string;  // instruction passed to the LLM auditor
+  weight?: number;            // relative weight (default: equal share). Normalized at scoring.
+  description: string;        // primary instruction passed to the LLM auditor
+  guidance?: string;          // optional extended guidance / examples (free-form)
+  critical_threshold?: number; // optional per-criterion critical override
 }
 
 /**
  * A team's audit rubric. Owned and edited by that team's admin (or any
- * super_admin). Stored in the Teams table.
+ * super_admin). Stored in the Teams table. Flexible by design — criteria,
+ * weights, scale, and thresholds are all editable.
  */
 export interface TeamRubric {
   team_id: Team;                       // partition key
@@ -45,10 +57,38 @@ export interface TeamRubric {
   description: string;
   criteria: Criterion[];
   system_prompt: string;
+  scale_max?: number;                  // max score per criterion (default 100)
   flag_threshold: number;              // overall score below this => flagged (default 70)
   critical_criterion_threshold: number; // any criterion below this => flagged (default 60)
   updated_at: string;
   updated_by: string | null;
+}
+
+/**
+ * A super_admin-configurable regex for parsing recording filenames. Multiple
+ * patterns are tried in `priority` order (lowest first = the "default"); the
+ * first whose named capture groups yield a valid recording wins. Each match
+ * increments `match_count`, and the most-used pattern is auto-promoted to the
+ * default — so when the dialer's naming convention changes, the new format's
+ * pattern naturally takes over without manual reordering.
+ *
+ * Regexes should use named capture groups. Recognized names:
+ *   agent_id (required), session_id | session_ts + session_seq, campaign,
+ *   customer_number, call_datetime | (year, month, day, hour, minute, second),
+ *   ext.
+ */
+export interface RecordingPattern {
+  pattern_id: string;        // partition key
+  label: string;             // human-friendly name
+  regex: string;             // regex source (named capture groups)
+  flags: string;             // regex flags, default "i"
+  priority: number;          // lower = tried earlier; the active default is the lowest
+  active: boolean;
+  match_count: number;       // how many recordings this pattern has parsed
+  is_builtin: boolean;       // the seeded Scaler-format default
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 /** Metadata parsed out of a recording's S3 key / filename. */
@@ -110,6 +150,50 @@ export interface AuditRecord {
   transcribed_at?: string;
   audited_at?: string;
   updated_at: string;
+
+  // Set once the audit's score has been folded into the performance aggregates,
+  // so retries / redeliveries don't double-count (see db/performance.ts).
+  performance_recorded?: boolean;
+}
+
+/**
+ * Singleton platform settings, editable at runtime by a super_admin. Currently
+ * holds the OpenAI models used for transcription and auditing, so the models can
+ * be changed from the dashboard without a redeploy. Missing values fall back to
+ * the `OPENAI_*_MODEL` env vars.
+ */
+export interface PlatformSettings {
+  setting_id: string;          // singleton partition key, always "global"
+  transcription_model: string;
+  audit_model: string;
+  updated_at: string;
+  updated_by: string | null;
+}
+
+/** Scope of a performance aggregate: a single agent or a whole team. */
+export type PerformanceScopeType = "agent" | "team";
+export type PerformanceGranularity = "day" | "month" | "year";
+
+/** One time-bucketed performance aggregate row in the Performance table. */
+export interface PerformanceBucket {
+  pk: string;                  // `${scope_type}#${scope_id}` (partition key)
+  bucket: string;              // `${granularity}#${period}` (sort key)
+  scope_type: PerformanceScopeType;
+  scope_id: string;
+  granularity: PerformanceGranularity;
+  period: string;              // e.g. "2024-04-01" | "2024-04" | "2024"
+  call_count: number;
+  score_sum: number;
+  flagged_count: number;
+  updated_at: string;
+}
+
+/** A point in a performance time series returned by the API (avg derived). */
+export interface PerformancePoint {
+  period: string;
+  call_count: number;
+  avg_score: number;
+  flagged_count: number;
 }
 
 /** The JSON document persisted to S3 under audits/ for each audited call. */

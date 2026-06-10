@@ -1,5 +1,20 @@
-# Runs the API + both workers from a single image. Provide real values in
-# .env.local first. Scale workers with: docker compose up --scale audit=3
+# Runs the API + both workers from a single image on one box.
+#
+#   1. Fill in .env.local (AWS creds OR rely on the EC2 instance role, OpenAI
+#      key, queue URLs — see docs/backend/DEPLOY.md).
+#   2. docker compose up -d --build
+#
+# Scale the (port-less) workers to drain bursts faster on this box:
+#   docker compose up -d --scale transcribe=2 --scale audit=3
+# (The `api` service can't be scaled because it binds a host port.)
+
+# Shared log rotation so a long-running box doesn't fill its disk with logs.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   api:
     build: .
@@ -9,6 +24,13 @@ services:
       - "4000:4000"
     command: ["node", "--enable-source-maps", "dist/index.js"]
     restart: unless-stopped
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:4000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   transcribe:
     image: cx-audit-backend
@@ -16,6 +38,7 @@ services:
     env_file: .env.local
     command: ["node", "--enable-source-maps", "dist/workers/transcribe.worker.js"]
     restart: unless-stopped
+    logging: *default-logging
     depends_on: [api]
 
   audit:
@@ -24,4 +47,5 @@ services:
     env_file: .env.local
     command: ["node", "--enable-source-maps", "dist/workers/audit.worker.js"]
     restart: unless-stopped
+    logging: *default-logging
     depends_on: [api]

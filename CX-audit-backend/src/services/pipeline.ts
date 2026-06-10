@@ -1,6 +1,6 @@
 import { env } from "../env.js";
 import { logger } from "../logger.js";
-import { parseRecordingMeta, buildAuditId } from "../lib/filename.js";
+import { resolveRecordingMeta, buildAuditId } from "../lib/filename.js";
 import {
   getRecordingBuffer,
   saveTranscription,
@@ -13,6 +13,8 @@ import { transcribeAudio, auditTranscript } from "./openai.js";
 import { getUserByAgentId } from "../db/users.js";
 import { getTeam } from "../db/teams.js";
 import { createAuditIfAbsent, getAudit, updateAudit, setStatus } from "../db/audits.js";
+import { recordAuditPerformance } from "../db/performance.js";
+import { getModelSettingsCached } from "../db/settings.js";
 import type { AuditDocument, AuditQueueMessage, AuditRecord } from "../types.js";
 
 /**
@@ -24,7 +26,7 @@ import type { AuditDocument, AuditQueueMessage, AuditRecord } from "../types.js"
  * that is already past `queued` is skipped.
  */
 export async function processTranscription(recordingKey: string): Promise<void> {
-  const meta = parseRecordingMeta(recordingKey);
+  const meta = await resolveRecordingMeta(recordingKey);
   if (!meta) {
     logger.warn(`Ignoring non-recording key: ${recordingKey}`);
     return;
@@ -67,7 +69,8 @@ export async function processTranscription(recordingKey: string): Promise<void> 
 
   await setStatus(auditId, "transcribing");
   const buffer = await getRecordingBuffer(recordingKey);
-  const transcript = await transcribeAudio(buffer, meta.file_name);
+  const { transcription_model } = await getModelSettingsCached();
+  const transcript = await transcribeAudio(buffer, meta.file_name, transcription_model);
   const transcriptionKey = await saveTranscription(transcript, auditId);
 
   await updateAudit(auditId, {
@@ -119,7 +122,8 @@ export async function processAudit(message: AuditQueueMessage): Promise<void> {
 
   await setStatus(audit_id, "auditing");
   const transcript = await getTranscription(transcription_key);
-  const result = await auditTranscript(transcript, rubric, { audit_id, agent_id, team });
+  const { audit_model } = await getModelSettingsCached();
+  const result = await auditTranscript(transcript, rubric, { audit_id, agent_id, team }, audit_model);
 
   const auditedAt = new Date().toISOString();
   const doc: AuditDocument = {
@@ -152,5 +156,20 @@ export async function processAudit(message: AuditQueueMessage): Promise<void> {
     criteria_scores: result.criteria_scores,
     audited_at: auditedAt,
   });
+
+  // Fold the score into the cumulative performance aggregates exactly once. The
+  // flag guards against double-counting on SQS redelivery; a manual re-audit
+  // (admin correction) deliberately does NOT re-aggregate.
+  if (!audit.performance_recorded) {
+    await recordAuditPerformance({
+      agentId: agent_id,
+      team,
+      score: result.score,
+      flagged: result.flagged,
+      datetimeISO: audit.call_datetime,
+    });
+    await updateAudit(audit_id, { performance_recorded: true });
+  }
+
   logger.info(`Audited ${audit_id}: score=${result.score} flagged=${result.flagged}`);
 }

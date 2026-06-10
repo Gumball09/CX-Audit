@@ -1,5 +1,5 @@
 /**
- * One-shot provisioning for local/dev: creates the three DynamoDB tables and
+ * One-shot provisioning for local/dev: creates the six DynamoDB tables and
  * the two SQS queues (each with a dead-letter queue). Idempotent — re-running
  * skips anything that already exists.
  *
@@ -92,6 +92,33 @@ const tables: CreateTableCommandInput[] = [
       },
     ],
   },
+  {
+    // Super-admin-configurable recording-filename regex patterns.
+    TableName: env.DDB_PATTERNS_TABLE,
+    BillingMode: PAY,
+    AttributeDefinitions: [{ AttributeName: "pattern_id", AttributeType: S }],
+    KeySchema: [{ AttributeName: "pattern_id", KeyType: "HASH" }],
+  },
+  {
+    // Time-bucketed performance aggregates: pk=`agent#..|team#..`, sk=`day#..` etc.
+    TableName: env.DDB_PERFORMANCE_TABLE,
+    BillingMode: PAY,
+    AttributeDefinitions: [
+      { AttributeName: "pk", AttributeType: S },
+      { AttributeName: "bucket", AttributeType: S },
+    ],
+    KeySchema: [
+      { AttributeName: "pk", KeyType: "HASH" },
+      { AttributeName: "bucket", KeyType: "RANGE" },
+    ],
+  },
+  {
+    // Singleton platform settings (e.g. the OpenAI models chosen at runtime).
+    TableName: env.DDB_SETTINGS_TABLE,
+    BillingMode: PAY,
+    AttributeDefinitions: [{ AttributeName: "setting_id", AttributeType: S }],
+    KeySchema: [{ AttributeName: "setting_id", KeyType: "HASH" }],
+  },
 ];
 
 async function createTables() {
@@ -138,7 +165,7 @@ async function createQueues() {
         QueueUrl: mainUrl,
         Attributes: {
           VisibilityTimeout: "300", // 5 min — long enough for a Whisper/GPT call
-          RedrivePolicy: JSON.stringify({ deadLetterTargetArn: dlqArn, maxReceiveCount: 5 }),
+          RedrivePolicy: JSON.stringify({ deadLetterTargetArn: dlqArn, maxReceiveCount: env.SQS_MAX_RECEIVE_COUNT }),
         },
       })
     );

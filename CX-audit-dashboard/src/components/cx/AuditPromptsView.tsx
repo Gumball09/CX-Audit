@@ -25,7 +25,14 @@ export function AuditPromptsView({ user }: { user: User }) {
   const canEdit = (teamId: Team) => user.role === "super_admin" || (user.role === "admin" && user.team === teamId);
   const editable = draft ? canEdit(draft.team_id) : false;
 
-  const weightSum = draft?.criteria.reduce((s, c) => s + (Number(c.weight) || 0), 0) ?? 0;
+  // Weights are relative and normalized server-side; we only show the resulting
+  // share so admins understand the effective weighting. No "must equal 100" rule.
+  const weightTotal = draft?.criteria.reduce((s, c) => s + (Number(c.weight) || 0), 0) ?? 0;
+  const sharePct = (w?: number) => {
+    if (!draft || draft.criteria.length === 0) return 0;
+    if (weightTotal <= 0) return Math.round(100 / draft.criteria.length); // equal weighting
+    return Math.round(((Number(w) || 0) / weightTotal) * 100);
+  };
 
   const saveMut = useMutation({
     mutationFn: (rubric: TeamRubric) =>
@@ -34,6 +41,7 @@ export function AuditPromptsView({ user }: { user: User }) {
         description: rubric.description,
         criteria: rubric.criteria,
         system_prompt: rubric.system_prompt,
+        scale_max: rubric.scale_max,
         flag_threshold: rubric.flag_threshold,
         critical_criterion_threshold: rubric.critical_criterion_threshold,
       }),
@@ -98,6 +106,10 @@ export function AuditPromptsView({ user }: { user: User }) {
 
             <div className="flex gap-4">
               <div className="flex-1">
+                <label className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">Score scale (max)</label>
+                <Input type="number" value={draft.scale_max ?? 100} disabled={!editable} onChange={(e) => setDraft({ ...draft, scale_max: Number(e.target.value) })} className="mt-1 bg-surface border-border font-mono w-28" />
+              </div>
+              <div className="flex-1">
                 <label className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">Flag threshold (overall &lt;)</label>
                 <Input type="number" value={draft.flag_threshold} disabled={!editable} onChange={(e) => setDraft({ ...draft, flag_threshold: Number(e.target.value) })} className="mt-1 bg-surface border-border font-mono w-28" />
               </div>
@@ -110,20 +122,28 @@ export function AuditPromptsView({ user }: { user: User }) {
             <div>
               <div className="flex items-center justify-between mb-2">
                 <label className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">Scoring Criteria</label>
-                <span className={cn("font-mono text-xs", weightSum === 100 ? "text-emerald-400" : "text-[color:var(--oorp)]")}>Sum: {weightSum}%</span>
+                <span className="font-mono text-[10px] text-muted-foreground">weights are relative · normalized automatically</span>
               </div>
               <div className="space-y-2">
                 {draft.criteria.map((c, i) => (
                   <div key={i} className="border border-border bg-surface rounded-md p-3">
                     <div className="flex gap-2 items-start">
                       <Input value={c.name} disabled={!editable} onChange={(e) => updateCriterion(i, { name: e.target.value })} placeholder="Criterion name" className="bg-background border-border flex-1" />
-                      <Input type="number" value={c.weight} disabled={!editable} onChange={(e) => updateCriterion(i, { weight: Number(e.target.value) })} className="bg-background border-border w-20 font-mono" />
-                      <span className="font-mono text-xs text-muted-foreground self-center">%</span>
+                      <div className="flex flex-col items-center">
+                        <Input type="number" value={c.weight ?? ""} disabled={!editable} onChange={(e) => updateCriterion(i, { weight: e.target.value === "" ? undefined : Number(e.target.value) })} placeholder="wt" className="bg-background border-border w-16 font-mono" />
+                        <span className="font-mono text-[9px] text-muted-foreground mt-0.5">= {sharePct(c.weight)}%</span>
+                      </div>
                       <button disabled={!editable} onClick={() => removeCriterion(i)} aria-label="Remove criterion" className="p-2 rounded-sm hover:bg-destructive/10 text-muted-foreground hover:text-destructive disabled:opacity-30">
                         <Minus className="h-3.5 w-3.5" />
                       </button>
                     </div>
                     <Textarea value={c.description} disabled={!editable} onChange={(e) => updateCriterion(i, { description: e.target.value })} placeholder="Instruction for the LLM…" className="mt-2 bg-background border-border text-xs" rows={2} />
+                    <Textarea value={c.guidance ?? ""} disabled={!editable} onChange={(e) => updateCriterion(i, { guidance: e.target.value || undefined })} placeholder="Optional extra guidance / examples for the auditor…" className="mt-2 bg-background border-border text-xs" rows={2} />
+                    <div className="mt-2 flex items-center gap-2">
+                      <label className="font-mono text-[10px] text-muted-foreground">Critical override (&lt;)</label>
+                      <Input type="number" value={c.critical_threshold ?? ""} disabled={!editable} onChange={(e) => updateCriterion(i, { critical_threshold: e.target.value === "" ? undefined : Number(e.target.value) })} placeholder="—" className="bg-background border-border w-20 font-mono" />
+                      <span className="font-mono text-[10px] text-muted-foreground/70">blank = use rubric default ({draft.critical_criterion_threshold})</span>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -139,15 +159,9 @@ export function AuditPromptsView({ user }: { user: User }) {
               <Textarea value={draft.system_prompt} disabled={!editable} onChange={(e) => setDraft({ ...draft, system_prompt: e.target.value })} className="mt-1 font-mono text-xs bg-[#0D0D0D] border-border focus-visible:ring-primary min-h-[160px]" />
             </div>
 
-            {editable && weightSum !== 100 && (
-              <div className="border border-[color:var(--oorp)]/40 bg-[color:var(--oorp)]/10 text-[color:var(--oorp)] px-3 py-2 rounded-sm font-mono text-xs">
-                Weights must total 100% before saving.
-              </div>
-            )}
-
             {editable && (
               <div className="flex gap-2 sticky bottom-0 bg-background py-3 border-t border-border">
-                <Button onClick={() => saveMut.mutate(draft)} disabled={weightSum !== 100 || saveMut.isPending} className="bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-40">
+                <Button onClick={() => saveMut.mutate(draft)} disabled={saveMut.isPending} className="bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-40">
                   {saveMut.isPending ? "Saving…" : "Save Changes"}
                 </Button>
                 <Button variant="ghost" onClick={() => selected && setDraft(selected)} className="border border-border">Discard</Button>

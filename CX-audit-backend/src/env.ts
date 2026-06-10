@@ -50,6 +50,13 @@ export const env = {
   SQS_BATCH_SIZE: Number(getEnv("SQS_BATCH_SIZE", false, "5")),
   // Long-poll wait time in seconds (0-20).
   SQS_WAIT_TIME_SECONDS: Number(getEnv("SQS_WAIT_TIME_SECONDS", false, "20")),
+  // After this many failed deliveries a message is routed to the DLQ. Used both
+  // to provision the redrive policy and to escalate the "last attempt" to a
+  // critical Sentry alert. Must match the queue's RedrivePolicy.maxReceiveCount.
+  SQS_MAX_RECEIVE_COUNT: Number(getEnv("SQS_MAX_RECEIVE_COUNT", false, "5")),
+  // Max messages a single worker processes in parallel. The worker only uses
+  // as much concurrency as the queue has work for, and idles to ~0 when empty.
+  WORKER_CONCURRENCY: Number(getEnv("WORKER_CONCURRENCY", false, "5")),
 
   // ---- DynamoDB ----
   DDB_USERS_TABLE: getEnv("DDB_USERS_TABLE", false, "cx_users"),
@@ -60,6 +67,20 @@ export const env = {
   OPENAI_API_KEY: getEnv("OPENAI_API_KEY", false),
   OPENAI_TRANSCRIPTION_MODEL: getEnv("OPENAI_TRANSCRIPTION_MODEL", false, "whisper-1"),
   OPENAI_AUDIT_MODEL: getEnv("OPENAI_AUDIT_MODEL", false, "gpt-4-turbo-preview"),
+
+  // ---- Sentry (error/alert reporting) ----
+  // Leave SENTRY_DSN blank to disable reporting entirely (local/stub mode).
+  SENTRY_DSN: getEnv("SENTRY_DSN", false),
+  SENTRY_ENVIRONMENT: getEnv("SENTRY_ENVIRONMENT", false, ""),
+  SENTRY_RELEASE: getEnv("SENTRY_RELEASE", false, ""),
+  SENTRY_TRACES_SAMPLE_RATE: Number(getEnv("SENTRY_TRACES_SAMPLE_RATE", false, "0")),
+
+  // ---- DynamoDB (extra tables for patterns + performance + settings) ----
+  DDB_PATTERNS_TABLE: getEnv("DDB_PATTERNS_TABLE", false, "cx_recording_patterns"),
+  DDB_PERFORMANCE_TABLE: getEnv("DDB_PERFORMANCE_TABLE", false, "cx_performance"),
+  // Holds the singleton platform settings row (e.g. the OpenAI models the
+  // super_admin selects at runtime). `OPENAI_*_MODEL` above are the fallbacks.
+  DDB_SETTINGS_TABLE: getEnv("DDB_SETTINGS_TABLE", false, "cx_settings"),
 };
 
 /**
@@ -90,11 +111,19 @@ export function validateEnv(context: "api" | "worker" = "api") {
     if (!env.OPENAI_API_KEY) (isProd ? fatal : warnings).push("OPENAI_API_KEY missing — transcription/audit run in STUB mode.");
   }
 
-  if (env.JWT_SECRET === "dev-insecure-secret-change-me" || env.JWT_SECRET.length < 16) {
-    (isProd ? fatal : warnings).push("JWT_SECRET is weak/default — set a strong random secret (e.g. `openssl rand -hex 32`).");
+  // Sentry is the production alerting channel — warn (don't fail) if it's off.
+  if (isProd && !env.SENTRY_DSN) {
+    warnings.push("SENTRY_DSN not set in production — crashes and quota-exhaustion alerts will NOT be reported.");
   }
-  if (isProd && env.CORS_ORIGIN === "*") {
-    warnings.push("CORS_ORIGIN is '*' in production — restrict it to the dashboard origin.");
+
+  // JWT + CORS only matter to the API process, not the workers.
+  if (context === "api") {
+    if (env.JWT_SECRET === "dev-insecure-secret-change-me" || env.JWT_SECRET.length < 16) {
+      (isProd ? fatal : warnings).push("JWT_SECRET is weak/default — set a strong random secret (e.g. `openssl rand -hex 32`).");
+    }
+    if (isProd && env.CORS_ORIGIN === "*") {
+      warnings.push("CORS_ORIGIN is '*' in production — restrict it to the dashboard origin.");
+    }
   }
 
   const realFatal = fatal.filter(Boolean);

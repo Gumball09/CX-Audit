@@ -12,9 +12,10 @@ that still need a human.
 | **Rate limiting** | 600 req / 15 min per IP globally; 20 / 15 min on `/api/auth/*`. Set `TRUST_PROXY=1` behind a load balancer. |
 | **Auth** | JWT bearer tokens; every request re-loads the user from DynamoDB so deactivation/role changes take effect immediately. |
 | **Error hygiene** | Internal errors never leak `error.message` in production; responses carry an `x-request-id` that ties back to logs. |
-| **Resilience** | AWS SDK `maxAttempts: 4` + OpenAI `maxRetries: 3` / 120s timeout; SQS dead-letter queues after 5 failed receives; pipeline is idempotent (conditional create on `audit_id`). |
-| **Scale** | Stateless API + workers; scale by running more instances. Audits API is cursor-paginated (`?limit&cursor`) so it never silently truncates. |
-| **Containers** | Multi-stage `Dockerfile` (non-root), `docker-compose.yml` for API + workers. |
+| **Resilience** | AWS SDK `maxAttempts: 4` + OpenAI `maxRetries: 3` / 120s timeout; SQS dead-letter queues after `SQS_MAX_RECEIVE_COUNT` failed receives; pipeline is idempotent (conditional create on `audit_id`). |
+| **Alerting** | **Sentry** reports worker crashes, **OpenAI credit/quota exhaustion** (escalated to `fatal`), and DLQ-bound failures — tagged by service. Wire Sentry alert rules → email/Slack. No-ops if `SENTRY_DSN` is unset. |
+| **Scale** | Stateless API + workers; scale by raising `WORKER_CONCURRENCY` / running more worker containers. Audits API is cursor-paginated (`?limit&cursor`) so it never silently truncates. |
+| **Containers** | Multi-stage `Dockerfile` (non-root, Node 20), `docker-compose.yml` (log rotation + API healthcheck) for API + workers on one box. |
 | **Graceful shutdown** | API drains on SIGTERM; workers finish the in-flight batch before exiting. |
 
 ## Pre-launch checklist
@@ -24,15 +25,19 @@ that still need a human.
 - [ ] `NODE_ENV=production`, `LOG_LEVEL=info` (or `warn`), `CORS_ORIGIN` = the
       real dashboard origin, `TRUST_PROXY=1` if behind ALB/CloudFront.
 - [ ] DynamoDB tables created (`npm run infra:create`) with **PITR enabled** and
-      on-demand billing; teams + first super_admin seeded (`npm run seed`).
+      on-demand billing; rubrics + built-in pattern + first super_admin seeded
+      (`npm run seed`).
 - [ ] SQS queues + DLQs created; **S3 → transcription queue notification wired**
       (see [SQS_SETUP.md](SQS_SETUP.md)).
-- [ ] IAM policy scoped to least privilege (below).
-- [ ] Workers: ≥2 instances of each for availability.
-- [ ] **Alarms**: DLQ `ApproximateNumberOfMessagesVisible > 0`; SQS queue age;
-      API 5xx rate; DynamoDB throttles.
-- [ ] HTTPS terminated at the load balancer; security groups locked down.
-- [ ] Run `npm test` and `npm run build` in CI; build + push the image.
+- [ ] IAM policy scoped to least privilege (below); on the EC2 box use the
+      **instance role** and leave AWS keys blank.
+- [ ] `SENTRY_DSN` set + alert rules configured (DLQ / quota / crash → email/Slack).
+- [ ] Deploy per **[DEPLOY.md](DEPLOY.md)** (single EC2 + Docker Compose);
+      `docker compose ps` shows the API healthy.
+- [ ] Optional CloudWatch alarms for infra metrics (SQS queue age, DynamoDB
+      throttles) to complement Sentry's app-level alerts.
+- [ ] HTTPS terminated in front (ALB / Caddy / nginx); security group locked down.
+- [ ] Run `npm test` and `npm run build` in CI; build the image.
 
 ## Least-privilege IAM policy (workers + API)
 
@@ -79,9 +84,13 @@ These genuinely need your input — I did **not** guess them:
    OAuth (all users are `@scaler.com`) or put the API behind an SSO proxy / API
    gateway. The swap is isolated to `routes/auth.ts#login` — everything else
    already trusts the issued JWT. **Pick a mechanism before exposing this publicly.**
-2. **Deploy target** (ECS Fargate / EKS / EC2 / Lambda-behind-SQS) — determines
-   how creds are injected and how workers are run/scaled.
-3. **Monitoring/alerting vendor** (CloudWatch alone vs Datadog/Sentry) — to wire
-   error tracking and the alarms above.
+2. ~~Deploy target~~ — **decided: single EC2 box + Docker Compose**
+   ([DEPLOY.md](DEPLOY.md)). Creds via the EC2 instance role; scale on-box via
+   `WORKER_CONCURRENCY` / `--scale`. Graduate to ECS autoscaling later with no
+   code change ([SCALING.md](SCALING.md)).
+3. ~~Monitoring/alerting vendor~~ — **decided: Sentry** for app-level errors,
+   crashes, OpenAI quota exhaustion, and DLQ alerts. Add CloudWatch alarms for
+   infra metrics if/when desired.
 4. **Data retention** for recordings, transcripts, and audit rows (compliance /
    PII). Customer phone numbers are stored — confirm retention + access policy.
+   *(Still open.)*

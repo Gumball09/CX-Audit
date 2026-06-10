@@ -1,5 +1,6 @@
 import { env, validateEnv } from "../env.js";
 import { logger } from "../logger.js";
+import { initSentry, reportCritical, flushSentry } from "../lib/sentry.js";
 import { consume } from "../lib/sqs.js";
 import { processTranscription } from "../services/pipeline.js";
 
@@ -28,6 +29,7 @@ function extractKeys(body: any): string[] {
 
 async function main() {
   validateEnv("worker");
+  initSentry("transcribe");
   await consume(env.SQS_TRANSCRIPTION_QUEUE_URL, "transcribe", async (body) => {
     const keys = extractKeys(body);
     if (keys.length === 0) {
@@ -40,7 +42,12 @@ async function main() {
   });
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
   logger.error("Transcription worker crashed", err);
+  reportCritical("Transcription worker crashed (process exiting)", {
+    where: "transcribe worker",
+    extra: { message: err instanceof Error ? err.message : String(err) },
+  });
+  await flushSentry();
   process.exit(1);
 });
