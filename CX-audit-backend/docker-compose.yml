@@ -1,0 +1,27 @@
+# Runs the API + both workers from a single image. Provide real values in
+# .env.local first. Scale workers with: docker compose up --scale audit=3
+services:
+  api:
+    build: .
+    image: cx-audit-backend
+    env_file: .env.local
+    ports:
+      - "4000:4000"
+    command: ["node", "--enable-source-maps", "dist/index.js"]
+    restart: unless-stopped
+
+  transcribe:
+    image: cx-audit-backend
+    build: .
+    env_file: .env.local
+    command: ["node", "--enable-source-maps", "dist/workers/transcribe.worker.js"]
+    restart: unless-stopped
+    depends_on: [api]
+
+  audit:
+    image: cx-audit-backend
+    build: .
+    env_file: .env.local
+    command: ["node", "--enable-source-maps", "dist/workers/audit.worker.js"]
+    restart: unless-stopped
+    depends_on: [api]

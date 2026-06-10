@@ -1,0 +1,152 @@
+import type { Audit, CriterionScore, Role, Team, TeamRubric, User } from "./cx-data";
+
+const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:4000/api";
+const TOKEN_KEY = "cx_audit_token";
+
+// ---- token storage -------------------------------------------------------
+
+export function getToken(): string | null {
+  if (typeof localStorage === "undefined") return null;
+  return localStorage.getItem(TOKEN_KEY);
+}
+export function setToken(token: string) {
+  localStorage.setItem(TOKEN_KEY, token);
+}
+export function clearToken() {
+  localStorage.removeItem(TOKEN_KEY);
+}
+
+// ---- fetch wrapper -------------------------------------------------------
+
+async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const token = getToken();
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...init,
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(init.headers ?? {}),
+    },
+  });
+  if (!res.ok) {
+    let message = res.statusText;
+    try {
+      const body = await res.json();
+      message = body.message ?? message;
+      if (body.errors) message += `: ${body.errors.join("; ")}`;
+    } catch {
+      /* non-JSON error */
+    }
+    throw new Error(message);
+  }
+  return res.status === 204 ? (undefined as T) : res.json();
+}
+
+// ---- auth ----------------------------------------------------------------
+
+export async function login(email: string): Promise<{ token: string; user: User }> {
+  const result = await request<{ token: string; user: User }>("/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ email }),
+  });
+  setToken(result.token);
+  return result;
+}
+
+export function fetchMe(): Promise<User> {
+  return request<User>("/auth/me");
+}
+
+// ---- audits --------------------------------------------------------------
+
+export interface AuditFilters {
+  team?: Team | "All";
+  flagged?: boolean;
+  from?: string;
+  to?: string;
+  limit?: number;
+  cursor?: string;
+}
+
+export interface AuditPage {
+  items: Audit[];
+  nextCursor?: string;
+}
+
+/** Fetch one page of audits (server returns { items, nextCursor }). */
+export function fetchAuditPage(filters: AuditFilters = {}): Promise<AuditPage> {
+  const q = new URLSearchParams();
+  if (filters.team && filters.team !== "All") q.set("team", filters.team);
+  if (filters.flagged) q.set("flagged", "true");
+  if (filters.from) q.set("from", filters.from);
+  if (filters.to) q.set("to", filters.to);
+  if (filters.limit) q.set("limit", String(filters.limit));
+  if (filters.cursor) q.set("cursor", filters.cursor);
+  const qs = q.toString();
+  return request<AuditPage>(`/audits${qs ? `?${qs}` : ""}`);
+}
+
+/** Convenience: first page as a flat array (used by the current table view). */
+export async function fetchAudits(filters: AuditFilters = {}): Promise<Audit[]> {
+  const page = await fetchAuditPage({ limit: 500, ...filters });
+  return page.items;
+}
+
+export function fetchTranscript(auditId: string): Promise<{ audit_id: string; transcript: string }> {
+  return request(`/audits/${encodeURIComponent(auditId)}/transcript`);
+}
+
+export function reauditCall(auditId: string): Promise<{ ok: boolean }> {
+  return request(`/audits/${encodeURIComponent(auditId)}/reaudit`, { method: "POST" });
+}
+
+export function reprocessRecording(recordingKey: string): Promise<{ ok: boolean }> {
+  return request(`/audits/reprocess`, {
+    method: "POST",
+    body: JSON.stringify({ recording_key: recordingKey }),
+  });
+}
+
+// ---- users ---------------------------------------------------------------
+
+export function fetchUsers(): Promise<User[]> {
+  return request<User[]>("/users");
+}
+
+export interface NewUser {
+  email: string;
+  name: string;
+  role: Role;
+  team?: Team | null;
+  agent_id?: string | null;
+}
+
+export function createUser(user: NewUser): Promise<User> {
+  return request<User>("/users", { method: "POST", body: JSON.stringify(user) });
+}
+
+export function updateUser(userId: string, patch: Partial<User>): Promise<User> {
+  return request<User>(`/users/${encodeURIComponent(userId)}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+}
+
+export function deleteUser(userId: string): Promise<{ ok: boolean }> {
+  return request(`/users/${encodeURIComponent(userId)}`, { method: "DELETE" });
+}
+
+// ---- teams / rubrics -----------------------------------------------------
+
+export function fetchTeams(): Promise<TeamRubric[]> {
+  return request<TeamRubric[]>("/teams");
+}
+
+export function updateTeam(teamId: Team, patch: Partial<TeamRubric>): Promise<TeamRubric> {
+  return request<TeamRubric>(`/teams/${encodeURIComponent(teamId)}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+}
+
+export type { CriterionScore };

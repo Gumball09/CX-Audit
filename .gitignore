@@ -1,0 +1,35 @@
+# ===========================================================================
+# Environment files — NEVER track secrets (AWS keys, OpenAI key, JWT secret).
+# These patterns apply recursively to every folder (backend, dashboard, etc.).
+# ===========================================================================
+.env
+.env.*
+*.env
+
+# ...but DO keep the committed templates so others know what to fill in.
+!.env.example
+!.env.*.example
+!.env.local.example
+
+# ---- Dependencies / build output ----
+node_modules/
+dist/
+dist-ssr/
+build/
+.output/
+.vinxi/
+.nitro/
+.tanstack/
+
+# ---- Logs ----
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---- OS / editor ----
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
