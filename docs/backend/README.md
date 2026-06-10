@@ -2,7 +2,15 @@
 
 Event-driven backend that transcribes and audits CX call recordings, with
 role-based access for the dashboard. TypeScript + Express + AWS (S3, SQS,
-DynamoDB) + OpenAI (Whisper + GPT).
+DynamoDB) + OpenAI (Whisper + GPT) + Sentry (error/alert reporting).
+
+Beyond the core pipeline it provides: **configurable recording-filename
+patterns** (super_admin regexes with usage-based auto-promotion, so a dialer
+naming change needs no deploy), **flexible team rubrics** (relative/optional
+weights, per-criterion critical overrides, free-form guidance, custom scale),
+**cumulative performance aggregates** (per-agent + per-team day/month/year graphs),
+and **Sentry alerting** for crashes, OpenAI credit/quota exhaustion, and
+DLQ-bound failures.
 
 > **New here?** Read [docs/ARCHITECTURE.md](ARCHITECTURE.md) first — it has
 > the end-to-end diagram and the design rationale.
@@ -31,24 +39,28 @@ src/
   logger.ts
   lib/
     aws.ts                 # shared S3 / SQS / DynamoDB clients
-    filename.ts            # recording-key parser (the Scaler format)
+    filename.ts            # recording-key parser (built-in + configurable patterns)
     s3.ts                  # download recording, save transcript/audit
-    sqs.ts                 # send + long-poll consumer loop
+    sqs.ts                 # send + long-poll consumer loop (+ Sentry on failure)
+    sentry.ts              # error/alert reporting (crash, OpenAI quota, DLQ)
   db/
-    users.ts  teams.ts  audits.ts   # DynamoDB repositories
+    users.ts  teams.ts  audits.ts   # core DynamoDB repositories
+    patterns.ts            # configurable recording-pattern store (+ auto-promote)
+    performance.ts         # time-bucketed performance aggregates
+    settings.ts            # singleton platform settings (OpenAI models, cached)
   services/
-    openai.ts              # transcribe + audit (with stub mode)
+    openai.ts              # transcribe + audit (flexible rubric, stub mode)
     auth.ts                # JWT sign/verify + middleware
     rbac.ts                # permission matrix
     pipeline.ts            # stage 1 + stage 2 logic (shared by workers)
   routes/
-    auth.ts  users.ts  teams.ts  audits.ts
+    auth.ts  users.ts  teams.ts  audits.ts  patterns.ts  performance.ts  settings.ts
   workers/
     transcribe.worker.ts   # consumes transcription queue
     audit.worker.ts        # consumes audit queue
 scripts/
-  create-infra.ts          # create DynamoDB tables + SQS queues
-  seed.ts                  # seed team rubrics + initial super_admin
+  create-infra.ts          # create 5 DynamoDB tables + SQS queues
+  seed.ts                  # seed rubrics + built-in pattern + super_admin
 ```
 
 > All documentation lives in the repo-level `docs/` folder (this file is
@@ -63,6 +75,8 @@ scripts/
 | S3 buckets, layout, **CORS** | [docs/S3_SETUP.md](S3_SETUP.md) |
 | SQS queues, DLQs, **S3 event wiring** | [docs/SQS_SETUP.md](SQS_SETUP.md) |
 | Roles & permissions | [docs/RBAC.md](RBAC.md) |
+| Scaling workers (concurrency + autoscaling) | [docs/SCALING.md](SCALING.md) |
+| **Deploy (single EC2 + Docker Compose)** | [docs/DEPLOY.md](DEPLOY.md) |
 | Production checklist + IAM | [docs/PRODUCTION.md](PRODUCTION.md) |
 
 ## Setup
@@ -125,7 +139,16 @@ requires `Authorization: Bearer <token>`.
 | DELETE | `/users/:id` | admin+ | delete (protects last super_admin) |
 | GET | `/teams` | any | list team rubrics |
 | GET | `/teams/:id` | any | one team rubric |
-| PATCH | `/teams/:id` | admin (own) / super_admin | edit rubric (weights must sum to 100) |
+| PATCH | `/teams/:id` | admin (own) / super_admin | edit rubric (flexible — weights relative, optional per-criterion overrides) |
+| GET | `/performance/me` | any | caller's own series (own agent / own team); `?granularity=day\|month\|year` |
+| GET | `/performance` | scoped | `?scope=agent\|team&id=&granularity=` series + summary (RBAC-enforced) |
+| GET | `/patterns` | super_admin | list recording-filename patterns |
+| POST | `/patterns` | super_admin | add a pattern `{ label, regex, flags? }` |
+| POST | `/patterns/test` | super_admin | dry-run `{ regex, sample }` → captured groups |
+| PATCH | `/patterns/:id` | super_admin | edit label/regex/priority/active |
+| DELETE | `/patterns/:id` | super_admin | delete (built-in protected) |
+| GET | `/settings` | admin+ | current platform settings (OpenAI models) |
+| PATCH | `/settings` | super_admin | change `transcription_model` / `audit_model` (live, ~60s) |
 
 See [docs/RBAC.md](RBAC.md) for the full permission matrix.
 
@@ -153,13 +176,14 @@ npm test          # vitest run (filename parser + RBAC matrix)
 
 ## Production
 
-Hardening (helmet, rate limiting, prod fail-fast config, retries, DLQs,
-pagination, non-root Docker image) is already wired. The launch checklist, the
-least-privilege IAM policy, scaling notes, and the **decisions still needed**
-(auth strength, deploy target, monitoring, data retention) live in
+Hardening (helmet, rate limiting, prod fail-fast config, retries, DLQs, Sentry
+alerting, pagination, non-root Docker image) is already wired. We deploy on a
+**single EC2 box with Docker Compose** — full walkthrough in
+**[docs/DEPLOY.md](DEPLOY.md)**. The launch checklist, least-privilege IAM
+policy, and the one remaining open decision (data retention) live in
 **[docs/PRODUCTION.md](PRODUCTION.md)**.
 
 ```bash
-docker compose up --build          # API + transcribe + audit from one image
-docker compose up --scale audit=3  # scale a worker
+docker compose up -d --build                         # API + transcribe + audit, one image
+docker compose up -d --scale transcribe=2 --scale audit=3   # more worker containers
 ```

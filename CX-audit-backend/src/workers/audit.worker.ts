@@ -1,5 +1,6 @@
 import { env, validateEnv } from "../env.js";
 import { logger } from "../logger.js";
+import { initSentry, reportCritical, flushSentry } from "../lib/sentry.js";
 import { consume } from "../lib/sqs.js";
 import { processAudit } from "../services/pipeline.js";
 import type { AuditQueueMessage } from "../types.js";
@@ -13,6 +14,7 @@ import type { AuditQueueMessage } from "../types.js";
  */
 async function main() {
   validateEnv("worker");
+  initSentry("audit");
   await consume(env.SQS_AUDIT_QUEUE_URL, "audit", async (body) => {
     const msg = body as AuditQueueMessage;
     if (!msg?.audit_id || !msg?.transcription_key) {
@@ -23,7 +25,12 @@ async function main() {
   });
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
   logger.error("Audit worker crashed", err);
+  reportCritical("Audit worker crashed (process exiting)", {
+    where: "audit worker",
+    extra: { message: err instanceof Error ? err.message : String(err) },
+  });
+  await flushSentry();
   process.exit(1);
 });

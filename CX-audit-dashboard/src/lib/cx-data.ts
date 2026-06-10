@@ -19,8 +19,10 @@ export interface User {
 
 export interface Criterion {
   name: string;
-  weight: number;
+  weight?: number;            // relative weight (normalized server-side); optional
   description: string;
+  guidance?: string;          // optional extended guidance / examples
+  critical_threshold?: number; // optional per-criterion critical override
 }
 
 export interface TeamRubric {
@@ -29,6 +31,7 @@ export interface TeamRubric {
   description: string;
   criteria: Criterion[];
   system_prompt: string;
+  scale_max?: number;          // max score per criterion (default 100)
   flag_threshold: number;
   critical_criterion_threshold: number;
   updated_at: string;
@@ -75,7 +78,59 @@ export interface Audit {
   updated_at: string;
 }
 
+export interface RecordingPattern {
+  pattern_id: string;
+  label: string;
+  regex: string;
+  flags: string;
+  priority: number;
+  active: boolean;
+  match_count: number;
+  is_builtin: boolean;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export type PerformanceGranularity = "day" | "month" | "year";
+
+export interface PerformancePoint {
+  period: string;
+  call_count: number;
+  avg_score: number;
+  flagged_count: number;
+}
+
+export interface PerformanceSummary {
+  total_calls: number;
+  total_flagged: number;
+  avg_score: number;
+  latest_period: string | null;
+  latest_avg_score: number | null;
+  latest_calls: number;
+  score_delta: number | null;
+}
+
+export interface PerformanceResponse {
+  scope: { type: "agent" | "team"; id: string } | null;
+  granularity: PerformanceGranularity;
+  series: PerformancePoint[];
+  summary: PerformanceSummary;
+}
+
+export interface PlatformSettings {
+  setting_id: string;
+  transcription_model: string;
+  audit_model: string;
+  updated_at: string;
+  updated_by: string | null;
+}
+
 export const TEAMS: Team[] = ["CS", "RM", "OORP", "Escalations"];
+
+// Suggested OpenAI model ids for the Settings UI (free text also allowed).
+export const TRANSCRIPTION_MODELS = ["whisper-1", "gpt-4o-mini-transcribe", "gpt-4o-transcribe"];
+export const AUDIT_MODELS = ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-4.1", "gpt-4.1-mini"];
 export const ROLES: Role[] = ["super_admin", "admin", "user"];
 
 export function teamClass(t: Team | null) {

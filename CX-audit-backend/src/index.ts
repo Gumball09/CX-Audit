@@ -5,13 +5,18 @@ import rateLimit from "express-rate-limit";
 import { randomUUID } from "crypto";
 import { env, validateEnv } from "./env.js";
 import { logger } from "./logger.js";
+import { initSentry, reportError } from "./lib/sentry.js";
 import { authenticate } from "./services/auth.js";
 import { authRouter } from "./routes/auth.js";
 import { usersRouter } from "./routes/users.js";
 import { teamsRouter } from "./routes/teams.js";
 import { auditsRouter } from "./routes/audits.js";
+import { patternsRouter } from "./routes/patterns.js";
+import { performanceRouter } from "./routes/performance.js";
+import { settingsRouter } from "./routes/settings.js";
 
 validateEnv("api");
+initSentry("api");
 
 const app = express();
 if (env.TRUST_PROXY) app.set("trust proxy", 1);
@@ -43,6 +48,7 @@ app.get("/api/health", (_req, res) =>
     s3_configured: !!env.S3_RECORDING_BUCKET,
     sqs_configured: !!env.SQS_TRANSCRIPTION_QUEUE_URL && !!env.SQS_AUDIT_QUEUE_URL,
     openai_configured: !!env.OPENAI_API_KEY,
+    sentry_configured: !!env.SENTRY_DSN,
   })
 );
 app.use("/api/auth", authLimiter, authRouter);
@@ -51,6 +57,9 @@ app.use("/api/auth", authLimiter, authRouter);
 app.use("/api/users", authenticate, usersRouter);
 app.use("/api/teams", authenticate, teamsRouter);
 app.use("/api/audits", authenticate, auditsRouter);
+app.use("/api/patterns", authenticate, patternsRouter);
+app.use("/api/performance", authenticate, performanceRouter);
+app.use("/api/settings", authenticate, settingsRouter);
 
 // 404 + error handlers.
 app.use((req: Request, res: Response) =>
@@ -58,6 +67,7 @@ app.use((req: Request, res: Response) =>
 );
 app.use((err: Error, req: Request, res: Response, _next: NextFunction) => {
   logger.error(`Unhandled error on ${req.method} ${req.path} [${req.id}]`, err);
+  reportError(err, { where: `api ${req.method} ${req.path}`, extra: { request_id: req.id } });
   // Never leak internals in production; the request id ties the response to logs.
   const body =
     env.NODE_ENV === "production"
