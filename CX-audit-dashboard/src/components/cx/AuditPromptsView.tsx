@@ -1,12 +1,16 @@
 import { useEffect, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { type User, type Criterion, type Rubric, type Team, type TeamInfra, type TeamRubric } from "@/lib/cx-data";
-import { fetchTeams, updateTeam, createTeam, fetchRubrics, createRubric, updateRubric, deleteRubric } from "@/lib/api";
+import { type User, type Criterion, type Rubric, type RubricSuggestion, type Team, type TeamInfra, type TeamRubric } from "@/lib/cx-data";
+import {
+  fetchTeams, updateTeam, createTeam, fetchRubrics, createRubric, updateRubric, deleteRubric,
+  fetchSuggestions, generateSuggestion, updateSuggestionStatus, deleteSuggestion,
+} from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
-import { ChevronDown, ChevronRight, Minus, Plus, Trash2 } from "lucide-react";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { ChevronDown, ChevronRight, Lightbulb, Minus, Plus, Sparkles, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 // The per-team infra fields, with the env var they fall back to when left blank.
@@ -216,6 +220,14 @@ export function AuditPromptsView({ user }: { user: User }) {
             {/* Additional rubrics — every call is scored against the primary (above) + these. */}
             <RubricsManager teamId={draft.team_id} canEdit={editable} />
 
+            {/* Feedback-driven rubric improvement suggestions. */}
+            <SuggestionsPanel
+              teamId={draft.team_id}
+              primaryRubricName={draft.name}
+              canEdit={editable}
+              onApplyPrimaryPrompt={(prompt) => setDraft({ ...draft, system_prompt: prompt })}
+            />
+
             {/* Per-team infrastructure — super_admin only. Blank = use the global env default. */}
             {isSuper && (
               <div className="border border-border rounded-md p-4 bg-surface">
@@ -258,6 +270,144 @@ export function AuditPromptsView({ user }: { user: User }) {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * Feedback loop: generates LLM suggestions for improving a rubric by analyzing
+ * how reviewers corrected the AI's audits, and lets an admin apply (the new
+ * system prompt) or dismiss each suggestion. Covers the primary rubric and any
+ * additional rubrics on the team.
+ */
+function SuggestionsPanel({
+  teamId,
+  primaryRubricName,
+  canEdit,
+  onApplyPrimaryPrompt,
+}: {
+  teamId: Team;
+  primaryRubricName: string;
+  canEdit: boolean;
+  onApplyPrimaryPrompt: (prompt: string) => void;
+}) {
+  const qc = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const [rubricId, setRubricId] = useState("primary");
+
+  const { data: suggestions = [] } = useQuery<RubricSuggestion[]>({
+    queryKey: ["suggestions", teamId],
+    queryFn: () => fetchSuggestions(teamId),
+    enabled: canEdit && open,
+  });
+  const { data: additional = [] } = useQuery<Rubric[]>({
+    queryKey: ["rubrics", teamId],
+    queryFn: () => fetchRubrics(teamId),
+    enabled: canEdit && open,
+  });
+
+  const rubricOptions = [{ id: "primary", name: primaryRubricName || "Primary rubric" }, ...additional.map((r) => ({ id: r.rubric_id, name: r.name }))];
+
+  const generate = useMutation({
+    mutationFn: () => generateSuggestion(teamId, rubricId),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["suggestions", teamId] }),
+  });
+  const setStatus = useMutation({
+    mutationFn: ({ id, status }: { id: string; status: "applied" | "dismissed" | "open" }) => updateSuggestionStatus(id, status),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["suggestions", teamId] }),
+  });
+  const remove = useMutation({
+    mutationFn: (id: string) => deleteSuggestion(id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["suggestions", teamId] }),
+  });
+  const applyToRubric = useMutation({
+    mutationFn: ({ rid, prompt }: { rid: string; prompt: string }) => updateRubric(rid, { system_prompt: prompt }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["rubrics", teamId] }),
+  });
+
+  const apply = (s: RubricSuggestion) => {
+    if (!s.suggested_system_prompt) return;
+    if (s.rubric_id === "primary") onApplyPrimaryPrompt(s.suggested_system_prompt);
+    else applyToRubric.mutate({ rid: s.rubric_id, prompt: s.suggested_system_prompt });
+    setStatus.mutate({ id: s.suggestion_id, status: "applied" });
+  };
+
+  if (!canEdit) return null;
+
+  return (
+    <div className="border border-border rounded-md p-4 bg-surface">
+      <button onClick={() => setOpen((o) => !o)} className="flex items-center gap-2 w-full text-left">
+        {open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+        <Lightbulb className="h-4 w-4 text-[color:var(--oorp)]" />
+        <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">Improvement Suggestions</span>
+      </button>
+
+      {open && (
+        <div className="mt-3 space-y-3">
+          <p className="font-mono text-[10px] text-muted-foreground/70">
+            Generates rubric edits from reviewer feedback on this team's audits (AI score vs. human correction).
+          </p>
+          <div className="flex items-end gap-2">
+            <div className="flex-1">
+              <label className="font-mono text-[10px] text-muted-foreground">Rubric to analyze</label>
+              <Select value={rubricId} onValueChange={setRubricId}>
+                <SelectTrigger className="mt-1 h-8 bg-background border-border text-xs"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {rubricOptions.map((r) => <SelectItem key={r.id} value={r.id} className="text-xs">{r.name}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </div>
+            <Button onClick={() => generate.mutate()} disabled={generate.isPending} className="h-8 text-xs bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50">
+              <Sparkles className={cn("h-3.5 w-3.5 mr-1", generate.isPending && "animate-pulse")} />
+              {generate.isPending ? "Analyzing…" : "Generate"}
+            </Button>
+          </div>
+          {generate.isError && <p className="text-xs text-destructive">{(generate.error as Error).message}</p>}
+
+          {suggestions.length === 0 ? (
+            <p className="text-xs text-muted-foreground">No suggestions yet. Collect reviewer feedback on calls, then generate.</p>
+          ) : (
+            <ul className="space-y-3">
+              {suggestions.map((s) => (
+                <li key={s.suggestion_id} className={cn("border rounded-md p-3 bg-background space-y-2", s.status === "applied" ? "border-emerald-500/30" : s.status === "dismissed" ? "border-border opacity-60" : "border-[color:var(--oorp)]/30")}>
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-semibold">{s.rubric_name}</span>
+                    <span className="font-mono text-[9px] uppercase px-1.5 py-0.5 border border-border text-muted-foreground rounded-sm">{s.status}</span>
+                    <span className="ml-auto font-mono text-[10px] text-muted-foreground">{s.based_on_feedback_count} feedback · {new Date(s.created_at).toLocaleDateString()}</span>
+                    <button onClick={() => remove.mutate(s.suggestion_id)} className="text-muted-foreground hover:text-destructive"><Trash2 className="h-3 w-3" /></button>
+                  </div>
+                  <p className="text-xs text-foreground/85 leading-relaxed">{s.summary}</p>
+                  {s.criteria_changes.length > 0 && (
+                    <ul className="space-y-1.5">
+                      {s.criteria_changes.map((c, i) => (
+                        <li key={i} className="text-xs border-l-2 border-border pl-2">
+                          <span className="font-medium">{c.criterion}:</span> <span className="text-foreground/80">{c.change}</span>
+                          <span className="block text-muted-foreground text-[11px]">{c.rationale}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {s.suggested_system_prompt && (
+                    <details className="text-xs">
+                      <summary className="cursor-pointer font-mono text-[10px] uppercase tracking-wider text-muted-foreground">Suggested system prompt</summary>
+                      <pre className="font-mono text-[11px] text-foreground/85 bg-[#0D0D0D] border border-border rounded-md p-2 mt-1 whitespace-pre-wrap leading-relaxed">{s.suggested_system_prompt}</pre>
+                    </details>
+                  )}
+                  {s.status === "open" && (
+                    <div className="flex gap-2 pt-1">
+                      <Button onClick={() => apply(s)} disabled={!s.suggested_system_prompt} className="h-7 text-xs bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-40">Apply prompt</Button>
+                      <Button variant="ghost" onClick={() => setStatus.mutate({ id: s.suggestion_id, status: "dismissed" })} className="h-7 text-xs border border-border">Dismiss</Button>
+                    </div>
+                  )}
+                  {s.status === "applied" && s.rubric_id === "primary" && (
+                    <p className="text-[11px] text-muted-foreground">Applied to the editor above — hit <span className="font-medium">Save Changes</span> to persist.</p>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
     </div>
   );
 }

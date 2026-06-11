@@ -85,6 +85,10 @@ export const env = {
   DDB_SETTINGS_TABLE: getEnv("DDB_SETTINGS_TABLE", false, "cx_settings"),
   // Additional per-team rubrics (the team row holds the primary rubric).
   DDB_RUBRICS_TABLE: getEnv("DDB_RUBRICS_TABLE", false, "cx_rubrics"),
+  // Human feedback on AI audits + the rubric-improvement suggestions derived
+  // from comparing AI scores against that feedback.
+  DDB_FEEDBACK_TABLE: getEnv("DDB_FEEDBACK_TABLE", false, "cx_feedback"),
+  DDB_SUGGESTIONS_TABLE: getEnv("DDB_SUGGESTIONS_TABLE", false, "cx_suggestions"),
 };
 
 /**

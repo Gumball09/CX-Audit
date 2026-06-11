@@ -2,7 +2,7 @@ import { OpenAI, toFile } from "openai";
 import { env } from "../env.js";
 import { logger } from "../logger.js";
 import { normalizeWeights } from "../validation.js";
-import type { CriterionScore, TeamRubric } from "../types.js";
+import type { CriterionScore, Feedback, SuggestedCriterionChange, TeamRubric } from "../types.js";
 
 // auditTranscript works on any rubric-shaped object — the team's primary rubric
 // (TeamRubric) or an additional Rubric. Both supply these scoring fields.
@@ -145,6 +145,96 @@ export async function auditTranscript(
     flagged: flagFromScores(score, criteria_scores),
     flag_reason: String(parsed.flag_reason ?? "No reason provided."),
     criteria_scores,
+  };
+}
+
+export interface SuggestionOutput {
+  summary: string;
+  suggested_system_prompt: string;
+  criteria_changes: SuggestedCriterionChange[];
+}
+
+/**
+ * Analyze a batch of reviewer feedback against the AI's scores for one rubric
+ * and propose concrete improvements: a refined system prompt plus per-criterion
+ * changes. The model is told to focus on the *patterns* of disagreement (where
+ * the AI consistently scored differently than reviewers, or missed concerns
+ * called out in comments), not one-off corrections.
+ */
+export async function suggestRubricImprovements(
+  rubric: Scorable & { description?: string },
+  feedback: Feedback[],
+  model: string = env.OPENAI_AUDIT_MODEL
+): Promise<SuggestionOutput> {
+  // Compact, LLM-friendly view of the divergence signal.
+  const items = feedback.map((f, i) => {
+    const corrections = (f.criteria_corrections ?? [])
+      .map((c) => `${c.name}: AI ${c.ai_score} -> human ${c.human_score}${c.note ? ` (${c.note})` : ""}`)
+      .join("; ");
+    return (
+      `#${i + 1} [${f.disposition}] AI score ${f.ai_score}` +
+      `${f.ai_flagged ? " (flagged)" : ""}` +
+      `${f.human_score !== undefined ? ` | human score ${f.human_score}` : ""}` +
+      `${f.human_flagged !== undefined ? ` | human flagged: ${f.human_flagged}` : ""}` +
+      `${corrections ? `\n   criteria: ${corrections}` : ""}` +
+      `${f.comment ? `\n   comment: ${f.comment}` : ""}`
+    );
+  });
+
+  if (!openai) {
+    logger.warn("OPENAI_API_KEY not set — returning stub rubric suggestion");
+    const disagreements = feedback.filter((f) => f.disposition !== "agree").length;
+    return {
+      summary:
+        `Stub suggestion (OpenAI not configured). Reviewed ${feedback.length} feedback item(s), ` +
+        `${disagreements} with disagreement. Connect OpenAI to get real prompt suggestions.`,
+      suggested_system_prompt: rubric.system_prompt,
+      criteria_changes: [],
+    };
+  }
+
+  const criteriaList = rubric.criteria
+    .map((c) => `- ${c.name}: ${c.description}${c.guidance ? ` (guidance: ${c.guidance})` : ""}`)
+    .join("\n");
+
+  const instructions =
+    `You are improving the scoring rubric "${rubric.name}" used by an AI to audit customer calls.\n` +
+    `Reviewers have corrected the AI's scores. Find the PATTERNS where the AI diverges from reviewers ` +
+    `and propose concrete rubric changes to close the gap.\n\n` +
+    `Current criteria:\n${criteriaList}\n\n` +
+    `Current system prompt:\n"""${rubric.system_prompt}"""\n\n` +
+    `Reviewer feedback (${feedback.length} items):\n${items.join("\n")}\n\n` +
+    `Respond with JSON only: {\n` +
+    `  "summary": string (2-4 sentences on the divergence patterns),\n` +
+    `  "suggested_system_prompt": string (a full revised system prompt; keep it if no change is warranted),\n` +
+    `  "criteria_changes": [{ "criterion": string (existing name, or "NEW: <name>" to add), "change": string, "rationale": string }]\n` +
+    `}`;
+
+  logger.info(`Generating rubric suggestion for "${rubric.name}" from ${feedback.length} feedback items (model ${model})`);
+  const res = await openai.chat.completions.create({
+    model,
+    response_format: { type: "json_object" },
+    temperature: 0.4,
+    max_tokens: 1200,
+    messages: [
+      { role: "system", content: "You are a meticulous QA rubric designer. Output strict JSON." },
+      { role: "user", content: instructions },
+    ],
+  });
+
+  const parsed = parseJson(res.choices[0]?.message?.content ?? "");
+  if (!parsed) throw new Error("Invalid OpenAI suggestion response format");
+  const changes: SuggestedCriterionChange[] = Array.isArray(parsed.criteria_changes)
+    ? parsed.criteria_changes.map((c: any) => ({
+        criterion: String(c.criterion ?? "").slice(0, 120),
+        change: String(c.change ?? "").slice(0, 600),
+        rationale: String(c.rationale ?? "").slice(0, 600),
+      }))
+    : [];
+  return {
+    summary: String(parsed.summary ?? "No summary provided.").slice(0, 1200),
+    suggested_system_prompt: String(parsed.suggested_system_prompt ?? rubric.system_prompt).slice(0, 4000),
+    criteria_changes: changes,
   };
 }
 

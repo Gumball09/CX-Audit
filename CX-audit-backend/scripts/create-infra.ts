@@ -136,6 +136,55 @@ const tables: CreateTableCommandInput[] = [
       },
     ],
   },
+  {
+    // Human feedback on AI audits. audit-index lists feedback for a call;
+    // team-index (sorted by created_at) lists a team's feedback for analysis.
+    TableName: env.DDB_FEEDBACK_TABLE,
+    BillingMode: PAY,
+    AttributeDefinitions: [
+      { AttributeName: "feedback_id", AttributeType: S },
+      { AttributeName: "audit_id", AttributeType: S },
+      { AttributeName: "team", AttributeType: S },
+      { AttributeName: "created_at", AttributeType: S },
+    ],
+    KeySchema: [{ AttributeName: "feedback_id", KeyType: "HASH" }],
+    GlobalSecondaryIndexes: [
+      {
+        IndexName: "audit-index",
+        KeySchema: [{ AttributeName: "audit_id", KeyType: "HASH" }],
+        Projection: { ProjectionType: "ALL" },
+      },
+      {
+        IndexName: "team-index",
+        KeySchema: [
+          { AttributeName: "team", KeyType: "HASH" },
+          { AttributeName: "created_at", KeyType: "RANGE" },
+        ],
+        Projection: { ProjectionType: "ALL" },
+      },
+    ],
+  },
+  {
+    // LLM-generated rubric-improvement suggestions (team-index, newest first).
+    TableName: env.DDB_SUGGESTIONS_TABLE,
+    BillingMode: PAY,
+    AttributeDefinitions: [
+      { AttributeName: "suggestion_id", AttributeType: S },
+      { AttributeName: "team", AttributeType: S },
+      { AttributeName: "created_at", AttributeType: S },
+    ],
+    KeySchema: [{ AttributeName: "suggestion_id", KeyType: "HASH" }],
+    GlobalSecondaryIndexes: [
+      {
+        IndexName: "team-index",
+        KeySchema: [
+          { AttributeName: "team", KeyType: "HASH" },
+          { AttributeName: "created_at", KeyType: "RANGE" },
+        ],
+        Projection: { ProjectionType: "ALL" },
+      },
+    ],
+  },
 ];
 
 async function createTables() {
