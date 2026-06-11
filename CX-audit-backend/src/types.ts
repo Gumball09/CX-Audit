@@ -224,6 +224,81 @@ export interface AuditRecord {
   performance_recorded?: boolean;
 }
 
+// ---------------------------------------------------------------------------
+// Feedback loop: humans review AI audits, and the divergence between the AI's
+// scores and the reviewer's correction is mined to suggest rubric/prompt edits.
+// ---------------------------------------------------------------------------
+
+/** Whether the reviewer agreed with the AI audit, disagreed, or partly agreed. */
+export type FeedbackDisposition = "agree" | "disagree" | "partial";
+
+/** A reviewer's per-criterion correction of the AI's score. */
+export interface FeedbackCriterionCorrection {
+  name: string;
+  ai_score: number;     // what the AI gave (snapshot at feedback time)
+  human_score: number;  // what the reviewer thinks it should be
+  note?: string;        // why they disagree (free-form)
+}
+
+/**
+ * One reviewer's feedback on a single audited call, scoped to one rubric (the
+ * primary rubric or an additional one). The AI's verdict is snapshotted here so
+ * the divergence signal survives a later re-audit. Stored in the Feedback table.
+ */
+export interface Feedback {
+  feedback_id: string;        // partition key, e.g. "FB-<random>"
+  audit_id: string;           // GSI audit-index — list all feedback for a call
+  team: Team;                 // GSI team-index — list all feedback for a team
+  agent_id: string;
+  rubric_id: string;          // "primary" for the team rubric, else the Rubric id
+  rubric_name: string;
+  reviewer_id: string;
+  reviewer_email: string;
+  disposition: FeedbackDisposition;
+  // AI verdict snapshot (at the moment feedback was given).
+  ai_score: number;
+  ai_flagged: boolean;
+  // Reviewer's correction (all optional — a comment alone is valid signal).
+  human_score?: number;
+  human_flagged?: boolean;
+  criteria_corrections?: FeedbackCriterionCorrection[];
+  comment: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Status of a generated rubric-improvement suggestion. */
+export type SuggestionStatus = "open" | "applied" | "dismissed";
+
+/** A proposed change to one rubric criterion (or a brand-new one). */
+export interface SuggestedCriterionChange {
+  criterion: string;   // existing criterion name, or "NEW: <name>" to add one
+  change: string;      // the concrete edit being proposed
+  rationale: string;   // why, citing the feedback patterns
+}
+
+/**
+ * An LLM-generated suggestion for improving a rubric, produced by analyzing the
+ * accumulated reviewer feedback for that rubric against the AI's scores. A
+ * super_admin/admin reviews it and either applies the proposed system prompt to
+ * the rubric or dismisses it. Stored in the Suggestions table.
+ */
+export interface RubricSuggestion {
+  suggestion_id: string;       // partition key, e.g. "SUG-<random>"
+  team: Team;                  // GSI team-index
+  rubric_id: string;           // which rubric this targets ("primary" or Rubric id)
+  rubric_name: string;
+  status: SuggestionStatus;
+  summary: string;                      // overview of the divergence patterns found
+  suggested_system_prompt?: string;     // proposed replacement system prompt
+  criteria_changes: SuggestedCriterionChange[];
+  based_on_feedback_count: number;      // how many feedback items informed this
+  created_at: string;
+  created_by: string | null;
+  updated_at: string;
+  updated_by: string | null;
+}
+
 /**
  * Singleton platform settings, editable at runtime by a super_admin. Currently
  * holds the OpenAI models used for transcription and auditing, so the models can

@@ -1,12 +1,17 @@
 import type {
   Audit,
   CriterionScore,
+  Feedback,
+  FeedbackDisposition,
+  FeedbackCriterionCorrection,
   PerformanceGranularity,
   PerformanceResponse,
   PlatformSettings,
   RecordingPattern,
   Role,
   Rubric,
+  RubricSuggestion,
+  SuggestionStatus,
   Team,
   TeamRubric,
   User,
@@ -202,6 +207,56 @@ export function updateRubric(rubricId: string, patch: Partial<Rubric>): Promise<
 
 export function deleteRubric(rubricId: string): Promise<{ ok: boolean }> {
   return request(`/rubrics/${encodeURIComponent(rubricId)}`, { method: "DELETE" });
+}
+
+// ---- feedback loop -------------------------------------------------------
+
+export function fetchAuditFeedback(auditId: string): Promise<Feedback[]> {
+  return request<Feedback[]>(`/feedback?audit=${encodeURIComponent(auditId)}`);
+}
+
+export function fetchTeamFeedback(teamId: Team): Promise<Feedback[]> {
+  return request<Feedback[]>(`/feedback?team=${encodeURIComponent(teamId)}`);
+}
+
+export interface NewFeedback {
+  audit_id: string;
+  rubric_id?: string;
+  disposition: FeedbackDisposition;
+  human_score?: number;
+  human_flagged?: boolean;
+  criteria_corrections?: FeedbackCriterionCorrection[];
+  comment: string;
+}
+
+export function createFeedback(f: NewFeedback): Promise<Feedback> {
+  return request<Feedback>("/feedback", { method: "POST", body: JSON.stringify(f) });
+}
+
+export function deleteFeedback(feedbackId: string): Promise<{ ok: boolean }> {
+  return request(`/feedback/${encodeURIComponent(feedbackId)}`, { method: "DELETE" });
+}
+
+export function fetchSuggestions(teamId: Team): Promise<RubricSuggestion[]> {
+  return request<RubricSuggestion[]>(`/suggestions?team=${encodeURIComponent(teamId)}`);
+}
+
+export function generateSuggestion(team: Team, rubricId = "primary"): Promise<RubricSuggestion> {
+  return request<RubricSuggestion>("/suggestions/generate", {
+    method: "POST",
+    body: JSON.stringify({ team, rubric_id: rubricId }),
+  });
+}
+
+export function updateSuggestionStatus(id: string, status: SuggestionStatus): Promise<RubricSuggestion> {
+  return request<RubricSuggestion>(`/suggestions/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ status }),
+  });
+}
+
+export function deleteSuggestion(id: string): Promise<{ ok: boolean }> {
+  return request(`/suggestions/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
 // ---- recording patterns (super_admin) ------------------------------------

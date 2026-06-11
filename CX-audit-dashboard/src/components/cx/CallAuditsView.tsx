@@ -5,18 +5,29 @@ import {
   type User,
   type Team,
   type TeamRubric,
+  type FeedbackDisposition,
   canSeeAdmin,
   scoreColor,
   statusClass,
   teamClass,
 } from "@/lib/cx-data";
-import { fetchAudits, fetchTranscript, reauditCall, fetchTeams, type AuditFilters } from "@/lib/api";
+import {
+  fetchAudits,
+  fetchTranscript,
+  reauditCall,
+  fetchTeams,
+  fetchAuditFeedback,
+  createFeedback,
+  deleteFeedback,
+  type AuditFilters,
+} from "@/lib/api";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
-import { ChevronDown, ChevronRight, Download, ExternalLink, RefreshCw } from "lucide-react";
+import { ChevronDown, ChevronRight, Download, ExternalLink, MessageSquarePlus, RefreshCw, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export function CallAuditsView({ user, users }: { user: User; users: User[] }) {
@@ -156,14 +167,15 @@ export function CallAuditsView({ user, users }: { user: User; users: User[] }) {
         </table>
       </div>
 
-      <AuditDrawer audit={selected} agentName={selected ? agentName(selected.agent_id) : ""} canReaudit={canSeeAdmin(user.role)} onClose={() => setSelected(null)} />
+      <AuditDrawer audit={selected} agentName={selected ? agentName(selected.agent_id) : ""} viewer={user} onClose={() => setSelected(null)} />
     </div>
   );
 }
 
-function AuditDrawer({ audit, agentName, canReaudit, onClose }: { audit: Audit | null; agentName: string; canReaudit: boolean; onClose: () => void }) {
+function AuditDrawer({ audit, agentName, viewer, onClose }: { audit: Audit | null; agentName: string; viewer: User; onClose: () => void }) {
   const [transcriptOpen, setTranscriptOpen] = useState(false);
   const queryClient = useQueryClient();
+  const canReaudit = canSeeAdmin(viewer.role);
 
   const { data: transcriptData, isLoading: transcriptLoading } = useQuery({
     queryKey: ["transcript", audit?.audit_id],
@@ -272,6 +284,8 @@ function AuditDrawer({ audit, agentName, canReaudit, onClose }: { audit: Audit |
               </section>
             )}
 
+            {canReaudit && <FeedbackSection audit={audit} viewer={viewer} />}
+
             {canReaudit && (
               <footer className="px-6 py-4 flex gap-2 sticky bottom-0 bg-surface border-t border-border">
                 <Button
@@ -288,6 +302,150 @@ function AuditDrawer({ audit, agentName, canReaudit, onClose }: { audit: Audit |
         )}
       </SheetContent>
     </Sheet>
+  );
+}
+
+const DISPOSITIONS: { value: FeedbackDisposition; label: string }[] = [
+  { value: "agree", label: "Agree with AI" },
+  { value: "partial", label: "Partly agree" },
+  { value: "disagree", label: "Disagree" },
+];
+
+/**
+ * Reviewer feedback on an AI audit. Lists prior feedback and lets an admin+
+ * record their own correction (per rubric), which feeds the rubric-improvement
+ * suggestions on the Prompts screen.
+ */
+function FeedbackSection({ audit, viewer }: { audit: Audit; viewer: User }) {
+  const queryClient = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const [rubricId, setRubricId] = useState("primary");
+  const [disposition, setDisposition] = useState<FeedbackDisposition>("disagree");
+  const [humanScore, setHumanScore] = useState("");
+  const [overrideFlag, setOverrideFlag] = useState(false);
+  const [humanFlagged, setHumanFlagged] = useState(false);
+  const [comment, setComment] = useState("");
+
+  const rubricOptions = audit.rubric_results?.length
+    ? audit.rubric_results.map((r) => ({ id: r.rubric_id, name: r.rubric_name }))
+    : [{ id: "primary", name: "Primary rubric" }];
+
+  const { data: feedback = [] } = useQuery({
+    queryKey: ["feedback", audit.audit_id],
+    queryFn: () => fetchAuditFeedback(audit.audit_id),
+    enabled: !!audit.audit_id,
+  });
+
+  const resetForm = () => {
+    setHumanScore(""); setOverrideFlag(false); setHumanFlagged(false); setComment(""); setDisposition("disagree");
+  };
+
+  const submit = useMutation({
+    mutationFn: () =>
+      createFeedback({
+        audit_id: audit.audit_id,
+        rubric_id: rubricId,
+        disposition,
+        human_score: humanScore.trim() === "" ? undefined : Number(humanScore),
+        human_flagged: overrideFlag ? humanFlagged : undefined,
+        comment: comment.trim(),
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["feedback", audit.audit_id] });
+      resetForm();
+      setOpen(false);
+    },
+  });
+
+  const remove = useMutation({
+    mutationFn: (id: string) => deleteFeedback(id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["feedback", audit.audit_id] }),
+  });
+
+  const canSubmit = comment.trim().length > 0 || disposition === "agree";
+
+  return (
+    <section className="px-6 py-4 border-b border-border space-y-3">
+      <div className="flex items-center justify-between">
+        <h3 className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+          Reviewer Feedback {feedback.length > 0 && `· ${feedback.length}`}
+        </h3>
+        <Button variant="ghost" size="sm" className="h-7 text-xs text-primary" onClick={() => setOpen((o) => !o)}>
+          <MessageSquarePlus className="h-3.5 w-3.5 mr-1" /> {open ? "Cancel" : "Add"}
+        </Button>
+      </div>
+
+      {feedback.length > 0 && (
+        <ul className="space-y-2">
+          {feedback.map((f) => (
+            <li key={f.feedback_id} className="border border-border rounded-md p-3 bg-background text-xs space-y-1">
+              <div className="flex items-center gap-2">
+                <span className={cn(
+                  "font-mono text-[9px] uppercase px-1.5 py-0.5 border rounded-sm",
+                  f.disposition === "agree" ? "border-emerald-500/40 text-emerald-400"
+                    : f.disposition === "partial" ? "border-[color:var(--oorp)]/40 text-[color:var(--oorp)]"
+                    : "border-[color:var(--escalations)]/40 text-[color:var(--escalations)]"
+                )}>{f.disposition}</span>
+                <span className="text-muted-foreground">{f.rubric_name}</span>
+                <span className="ml-auto font-mono text-muted-foreground">
+                  AI {f.ai_score}{f.human_score !== undefined ? ` → ${f.human_score}` : ""}
+                </span>
+                {(f.reviewer_id === viewer.user_id || viewer.role === "super_admin") && (
+                  <button onClick={() => remove.mutate(f.feedback_id)} className="text-muted-foreground hover:text-destructive">
+                    <Trash2 className="h-3 w-3" />
+                  </button>
+                )}
+              </div>
+              {f.comment && <p className="text-foreground/80 leading-relaxed">{f.comment}</p>}
+              <p className="font-mono text-[10px] text-muted-foreground">{f.reviewer_email} · {new Date(f.created_at).toLocaleDateString()}</p>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {open && (
+        <div className="border border-border rounded-md p-3 bg-background space-y-3">
+          {rubricOptions.length > 1 && (
+            <Field label="Rubric">
+              <Select value={rubricId} onValueChange={setRubricId}>
+                <SelectTrigger className="h-8 bg-surface border-border text-xs"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {rubricOptions.map((r) => <SelectItem key={r.id} value={r.id} className="text-xs">{r.name}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </Field>
+          )}
+          <Field label="Assessment">
+            <Select value={disposition} onValueChange={(v) => setDisposition(v as FeedbackDisposition)}>
+              <SelectTrigger className="h-8 bg-surface border-border text-xs"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {DISPOSITIONS.map((d) => <SelectItem key={d.value} value={d.value} className="text-xs">{d.label}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          </Field>
+          <Field label="Corrected score (optional)">
+            <Input type="number" min={0} max={100} value={humanScore} onChange={(e) => setHumanScore(e.target.value)} placeholder="e.g. 80" className="h-8 bg-surface border-border text-xs" />
+          </Field>
+          <div className="flex items-center gap-2">
+            <Switch checked={overrideFlag} onCheckedChange={setOverrideFlag} />
+            <span className="text-xs text-muted-foreground">Override flag decision</span>
+            {overrideFlag && (
+              <label className="ml-auto flex items-center gap-2 text-xs">
+                <span className="text-muted-foreground">Should be flagged</span>
+                <Switch checked={humanFlagged} onCheckedChange={setHumanFlagged} />
+              </label>
+            )}
+          </div>
+          <Field label="Comment">
+            <Textarea value={comment} onChange={(e) => setComment(e.target.value)} placeholder="Where did the AI get it wrong, and why?" rows={3} className="bg-surface border-border text-xs" />
+          </Field>
+          {submit.isError && <p className="text-xs text-destructive">{(submit.error as Error).message}</p>}
+          <Button onClick={() => submit.mutate()} disabled={!canSubmit || submit.isPending} className="w-full h-8 text-xs bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50">
+            {submit.isPending ? "Saving…" : "Submit feedback"}
+          </Button>
+        </div>
+      )}
+    </section>
   );
 }
 

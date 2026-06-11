@@ -89,6 +89,63 @@ export interface RubricResult {
   criteria_scores: CriterionScore[];
 }
 
+// ---- feedback loop -------------------------------------------------------
+
+export type FeedbackDisposition = "agree" | "disagree" | "partial";
+
+export interface FeedbackCriterionCorrection {
+  name: string;
+  ai_score: number;
+  human_score: number;
+  note?: string;
+}
+
+/** A reviewer's correction of an AI audit (scoped to one rubric). */
+export interface Feedback {
+  feedback_id: string;
+  audit_id: string;
+  team: Team;
+  agent_id: string;
+  rubric_id: string;
+  rubric_name: string;
+  reviewer_id: string;
+  reviewer_email: string;
+  disposition: FeedbackDisposition;
+  ai_score: number;
+  ai_flagged: boolean;
+  human_score?: number;
+  human_flagged?: boolean;
+  criteria_corrections?: FeedbackCriterionCorrection[];
+  comment: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export type SuggestionStatus = "open" | "applied" | "dismissed";
+
+export interface SuggestedCriterionChange {
+  criterion: string;
+  change: string;
+  rationale: string;
+}
+
+/** An LLM-generated rubric-improvement suggestion derived from feedback. */
+export interface RubricSuggestion {
+  suggestion_id: string;
+  team: Team;
+  rubric_id: string;
+  rubric_name: string;
+  status: SuggestionStatus;
+  summary: string;
+  suggested_system_prompt?: string;
+  criteria_changes: SuggestedCriterionChange[];
+  based_on_feedback_count: number;
+  created_at: string;
+  created_by: string | null;
+  updated_at: string;
+  updated_by: string | null;
+}
+
 export type AuditStatus =
   | "queued"
   | "transcribing"
