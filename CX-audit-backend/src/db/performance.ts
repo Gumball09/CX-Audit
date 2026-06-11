@@ -90,16 +90,18 @@ export async function getPerformanceSeries(
   from?: string,
   to?: string
 ): Promise<PerformancePoint[]> {
-  const names: Record<string, string> = {};
+  // `bucket` is a DynamoDB reserved keyword, so it must be referenced via an
+  // ExpressionAttributeName alias in the KeyConditionExpression.
+  const names: Record<string, string> = { "#bucket": "bucket" };
   const values: Record<string, unknown> = { ":pk": `${scopeType}#${scopeId}` };
   let keyCond = "pk = :pk";
 
   if (from && to) {
-    keyCond += " AND bucket BETWEEN :lo AND :hi";
+    keyCond += " AND #bucket BETWEEN :lo AND :hi";
     values[":lo"] = `${granularity}#${from}`;
     values[":hi"] = `${granularity}#${to}`;
   } else {
-    keyCond += " AND begins_with(bucket, :prefix)";
+    keyCond += " AND begins_with(#bucket, :prefix)";
     values[":prefix"] = `${granularity}#`;
   }
 
