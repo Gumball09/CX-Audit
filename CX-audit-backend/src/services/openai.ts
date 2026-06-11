@@ -3,6 +3,7 @@ import { env } from "../env.js";
 import { logger } from "../logger.js";
 import { normalizeWeights } from "../validation.js";
 import { splitAudioOnSilence } from "../lib/audio.js";
+import { repetitionScore, collapseRepetitions } from "../lib/transcript.js";
 import type { CriterionScore, Feedback, SuggestedCriterionChange, TeamRubric } from "../types.js";
 
 // auditTranscript works on any rubric-shaped object — the team's primary rubric
@@ -33,23 +34,60 @@ export async function transcribeAudio(
     return `[STUB TRANSCRIPT for ${fileName}] Agent: Hello, thank you for calling. Customer: Hi, I have a question about my course. Agent: Sure, I can help with that.`;
   }
 
+  let text: string;
   try {
-    return await transcribeOnce(buffer, fileName, model);
+    text = await transcribeResilient(buffer, fileName, model);
   } catch (err) {
     if (!isInputTooLargeError(err)) throw err;
     logger.warn(
       `"${fileName}" exceeds the ${model} input limit — falling back to silence-based chunked transcription`
     );
-    return await transcribeChunked(buffer, fileName, model);
+    text = await transcribeChunked(buffer, fileName, model);
   }
+  // Final safety net: drop any residual repetition loops the model emitted.
+  return collapseRepetitions(text);
 }
 
 /** Single one-shot transcription request. */
 async function transcribeOnce(buffer: Buffer, fileName: string, model: string): Promise<string> {
   const file = await toFile(buffer, fileName);
+  // NOTE: deliberately no `temperature` — setting temperature=0 made the
+  // gpt-4o-transcribe models loop MORE on low-bitrate telephony audio.
   const res = await openai!.audio.transcriptions.create({ file, model });
   logger.debug(`Transcription complete (${(res.text ?? "").length} chars)`);
   return res.text ?? "";
+}
+
+/**
+ * Transcribe one audio unit (a whole short file, or a single chunk) with
+ * loop-recovery: if the result is too repetitive (a decoding-loop
+ * hallucination), retry — the models are non-deterministic, so a clean run
+ * usually appears within a few tries — and keep the least-repetitive result.
+ * Input-too-large errors are NOT retried; they propagate so the caller can chunk.
+ */
+async function transcribeResilient(buffer: Buffer, fileName: string, model: string): Promise<string> {
+  const maxAttempts = Math.max(1, env.TRANSCRIPTION_MAX_RETRIES + 1);
+  let best = "";
+  let bestScore = Infinity;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const text = await transcribeOnce(buffer, fileName, model);
+    const score = repetitionScore(text);
+    if (score < bestScore) {
+      best = text;
+      bestScore = score;
+    }
+    if (score <= env.TRANSCRIPTION_REPETITION_THRESHOLD) break;
+    if (attempt < maxAttempts) {
+      logger.warn(
+        `"${fileName}" transcription looped (repetition ${score.toFixed(2)} > ` +
+          `${env.TRANSCRIPTION_REPETITION_THRESHOLD}); retry ${attempt}/${maxAttempts - 1}`
+      );
+    }
+  }
+  if (bestScore > env.TRANSCRIPTION_REPETITION_THRESHOLD) {
+    logger.warn(`"${fileName}" still repetitive after retries (best ${bestScore.toFixed(2)}); relying on collapse.`);
+  }
+  return best;
 }
 
 /**
@@ -89,7 +127,7 @@ async function transcribeChunked(buffer: Buffer, fileName: string, model: string
 
   const parts: string[] = [];
   for (const chunk of chunks) {
-    const text = await transcribeOnce(chunk.buffer, chunk.fileName, model);
+    const text = await transcribeResilient(chunk.buffer, chunk.fileName, model);
     parts.push(text.trim());
   }
   const stitched = parts.filter(Boolean).join(" ");
