@@ -82,6 +82,14 @@ export const env = {
   TRANSCRIPTION_SILENCE_DB: Number(getEnv("TRANSCRIPTION_SILENCE_DB", false, "-30")),
   // Minimum silence duration (seconds) to qualify as a cut candidate.
   TRANSCRIPTION_SILENCE_MIN_SECONDS: Number(getEnv("TRANSCRIPTION_SILENCE_MIN_SECONDS", false, "0.6")),
+  // ---- Transcription loop recovery (anti-hallucination) ----
+  // Low-bitrate telephony audio makes gpt-4o-transcribe loop ("Hello." x300).
+  // When a transcription's repetition score exceeds the threshold we retry (up
+  // to this many times) and keep the least-repetitive run; a final collapse pass
+  // removes any residue. 0 disables retries (collapse still runs).
+  TRANSCRIPTION_MAX_RETRIES: Number(getEnv("TRANSCRIPTION_MAX_RETRIES", false, "3")),
+  // Repetition score (0=clean .. 1=fully looped) above which a run is retried.
+  TRANSCRIPTION_REPETITION_THRESHOLD: Number(getEnv("TRANSCRIPTION_REPETITION_THRESHOLD", false, "0.3")),
 
   // ---- Sentry (error/alert reporting) ----
   // Leave SENTRY_DSN blank to disable reporting entirely (local/stub mode).
