@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { logger } from "../logger.js";
 import { isEmail } from "../validation.js";
-import { requireRole } from "../services/auth.js";
+import { requireRole, publicUser } from "../services/auth.js";
 import { canManageUser } from "../services/rbac.js";
 import {
   listUsers,
@@ -27,7 +27,7 @@ usersRouter.get("/", requireRole("admin", "super_admin"), async (req, res) => {
     req.user!.role === "super_admin"
       ? all
       : all.filter((u) => u.team === req.user!.team || u.user_id === req.user!.user_id);
-  res.json(visible);
+  res.json(visible.map(publicUser));
 });
 
 /** POST /api/users — create an admin (super_admin) or user (admin+). */
@@ -55,13 +55,15 @@ usersRouter.post("/", requireRole("admin", "super_admin"), async (req, res) => {
     team: team ?? null,
     agent_id: agent_id?.trim() || null,
     status: "active",
+    // No password yet — the user sets one on first login (self-service).
+    password_hash: null,
     created_at: now,
     created_by: req.user!.user_id,
     updated_at: now,
   };
   await putUser(user);
   logger.info(`User created: ${user.email} (${user.role}) by ${req.user!.email}`);
-  res.status(201).json(user);
+  res.status(201).json(publicUser(user));
 });
 
 /** PATCH /api/users/:id — update a user within permission bounds. */
@@ -88,7 +90,7 @@ usersRouter.patch("/:id", requireRole("admin", "super_admin"), async (req, res) 
 
   const updated = await updateUser(target.user_id, patch);
   logger.info(`User updated: ${target.email} by ${req.user!.email}`);
-  res.json(updated);
+  res.json(updated ? publicUser(updated) : null);
 });
 
 /** DELETE /api/users/:id — remove a user (RBAC enforced; protects last super_admin). */

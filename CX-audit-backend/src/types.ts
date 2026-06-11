@@ -23,6 +23,10 @@ export interface User {
   team: Team | null;      // null for org-wide super_admins
   agent_id: string | null; // dialer agent id, e.g. "495367" (GSI agent-index)
   status: UserStatus;
+  // bcrypt hash of the login password. `null` until the user completes the
+  // self-service first-login set-password step. NEVER sent to the client —
+  // strip via `publicUser()` before returning a user in any API response.
+  password_hash: string | null;
   created_at: string;
   created_by: string | null;
   updated_at: string;

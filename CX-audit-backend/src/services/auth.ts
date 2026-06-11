@@ -15,6 +15,15 @@ export function signToken(user: User): string {
   return jwt.sign(payload, env.JWT_SECRET, { expiresIn: env.JWT_EXPIRES_IN } as jwt.SignOptions);
 }
 
+/**
+ * Strip the password hash before a user record is returned to a client.
+ * Every response that includes a user MUST pass it through this first.
+ */
+export function publicUser(user: User): Omit<User, "password_hash"> {
+  const { password_hash: _omit, ...rest } = user;
+  return rest;
+}
+
 // Augment Express request with the authenticated user.
 declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace
