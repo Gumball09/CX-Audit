@@ -1,7 +1,8 @@
 // Domain types — mirror of the backend contract (CX-audit-backend/src/types.ts).
 
 export type Role = "super_admin" | "admin" | "user";
-export type Team = "CS" | "RM" | "OORP" | "Escalations";
+// Teams are created at runtime by super_admins, so a team is an open slug string.
+export type Team = string;
 export type Status = "active" | "inactive";
 
 export interface User {
@@ -25,6 +26,18 @@ export interface Criterion {
   critical_threshold?: number; // optional per-criterion critical override
 }
 
+/** Per-team infrastructure overrides (all optional; fall back to global env). */
+export interface TeamInfra {
+  recording_bucket?: string;
+  output_bucket?: string;
+  transcription_queue_url?: string;
+  audit_queue_url?: string;
+  batch_size?: number;
+  wait_time_seconds?: number;
+  max_receive_count?: number;
+  worker_concurrency?: number;
+}
+
 export interface TeamRubric {
   team_id: Team;
   name: string;
@@ -34,6 +47,10 @@ export interface TeamRubric {
   scale_max?: number;          // max score per criterion (default 100)
   flag_threshold: number;
   critical_criterion_threshold: number;
+  infra?: TeamInfra;           // per-team buckets/queues/tuning (super_admin)
+  active?: boolean;
+  created_at?: string;
+  created_by?: string | null;
   updated_at: string;
   updated_by: string | null;
 }
@@ -135,13 +152,15 @@ export const ROLES: Role[] = ["super_admin", "admin", "user"];
 
 export function teamClass(t: Team | null) {
   if (!t) return "bg-muted text-muted-foreground border-border";
-  return {
+  const known: Record<string, string> = {
     CS: "bg-[color:var(--cs)]/15 text-[color:var(--cs)] border-[color:var(--cs)]/30",
     RM: "bg-[color:var(--rm)]/15 text-[color:var(--rm)] border-[color:var(--rm)]/30",
     OORP: "bg-[color:var(--oorp)]/15 text-[color:var(--oorp)] border-[color:var(--oorp)]/30",
     Escalations:
       "bg-[color:var(--escalations)]/15 text-[color:var(--escalations)] border-[color:var(--escalations)]/30",
-  }[t];
+  };
+  // Dynamically-created teams fall back to a neutral chip.
+  return known[t] ?? "bg-surface-2 text-foreground border-border";
 }
 
 export function roleClass(r: Role) {

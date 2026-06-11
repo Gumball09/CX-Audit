@@ -12,12 +12,12 @@ import {
   deleteUser,
   newUserId,
 } from "../db/users.js";
-import type { Role, Team, User } from "../types.js";
+import { getTeam } from "../db/teams.js";
+import type { Role, User } from "../types.js";
 
 export const usersRouter = Router();
 
 const ROLES: Role[] = ["super_admin", "admin", "user"];
-const TEAMS: Team[] = ["CS", "RM", "OORP", "Escalations"];
 
 /** GET /api/users — admins and super_admins may list users. */
 usersRouter.get("/", requireRole("admin", "super_admin"), async (req, res) => {
@@ -37,7 +37,7 @@ usersRouter.post("/", requireRole("admin", "super_admin"), async (req, res) => {
   if (!isEmail(email)) return res.status(400).json({ message: "Valid email required." });
   if (!name?.trim()) return res.status(400).json({ message: "Name required." });
   if (!role || !ROLES.includes(role)) return res.status(400).json({ message: "Valid role required." });
-  if (team && !TEAMS.includes(team)) return res.status(400).json({ message: "Invalid team." });
+  if (team && !(await getTeam(team))) return res.status(400).json({ message: `Unknown team "${team}".` });
 
   if (!canManageUser(req.user!, "create", role, team ?? null)) {
     return res.status(403).json({ message: "You cannot create a user with that role/team." });
@@ -84,8 +84,8 @@ usersRouter.patch("/:id", requireRole("admin", "super_admin"), async (req, res) 
   if (patch.role && !ROLES.includes(patch.role)) {
     return res.status(400).json({ message: "Invalid role." });
   }
-  if (patch.team && !TEAMS.includes(patch.team)) {
-    return res.status(400).json({ message: "Invalid team." });
+  if (patch.team && !(await getTeam(patch.team))) {
+    return res.status(400).json({ message: `Unknown team "${patch.team}".` });
   }
 
   const updated = await updateUser(target.user_id, patch);

@@ -3,14 +3,14 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   type Audit,
   type User,
-  TEAMS,
   type Team,
+  type TeamRubric,
   canSeeAdmin,
   scoreColor,
   statusClass,
   teamClass,
 } from "@/lib/cx-data";
-import { fetchAudits, fetchTranscript, reauditCall, type AuditFilters } from "@/lib/api";
+import { fetchAudits, fetchTranscript, reauditCall, fetchTeams, type AuditFilters } from "@/lib/api";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -38,6 +38,9 @@ export function CallAuditsView({ user, users }: { user: User; users: User[] }) {
     queryKey: ["audits", filters],
     queryFn: () => fetchAudits(filters),
   });
+
+  // Team filter options come from the live team list (includes new teams).
+  const { data: teamList = [] } = useQuery<TeamRubric[]>({ queryKey: ["teams"], queryFn: fetchTeams, enabled: canSeeAdmin(user.role) });
 
   const userByAgent = useMemo(
     () => Object.fromEntries(users.filter((u) => u.agent_id).map((u) => [u.agent_id!, u])),
@@ -87,7 +90,7 @@ export function CallAuditsView({ user, users }: { user: User; users: User[] }) {
               <SelectTrigger className="w-[160px] bg-surface border-border font-mono text-xs h-9"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="All">All</SelectItem>
-                {TEAMS.map((t) => <SelectItem key={t} value={t}>{t}</SelectItem>)}
+                {teamList.map((t) => <SelectItem key={t.team_id} value={t.team_id}>{t.name}</SelectItem>)}
               </SelectContent>
             </Select>
           </Field>

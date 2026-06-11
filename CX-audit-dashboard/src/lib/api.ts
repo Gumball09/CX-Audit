@@ -173,6 +173,11 @@ export function fetchTeams(): Promise<TeamRubric[]> {
   return request<TeamRubric[]>("/teams");
 }
 
+/** Create a new team (super_admin). `team_id` is the slug; infra is optional. */
+export function createTeam(team: Partial<TeamRubric> & { team_id: string }): Promise<TeamRubric> {
+  return request<TeamRubric>("/teams", { method: "POST", body: JSON.stringify(team) });
+}
+
 export function updateTeam(teamId: Team, patch: Partial<TeamRubric>): Promise<TeamRubric> {
   return request<TeamRubric>(`/teams/${encodeURIComponent(teamId)}`, {
     method: "PATCH",

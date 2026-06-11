@@ -4,10 +4,10 @@ import {
   type PerformanceGranularity,
   type PerformanceResponse,
   type Team,
+  type TeamRubric,
   type User,
-  TEAMS,
 } from "@/lib/cx-data";
-import { fetchMyPerformance, fetchPerformance } from "@/lib/api";
+import { fetchMyPerformance, fetchPerformance, fetchTeams } from "@/lib/api";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   Area,
@@ -32,6 +32,7 @@ export function PerformanceView({ user }: { user: User }) {
   const [granularity, setGranularity] = useState<PerformanceGranularity>("month");
   const isUser = user.role === "user";
   const [team, setTeam] = useState<Team>(user.team ?? "CS");
+  const { data: teamList = [] } = useQuery<TeamRubric[]>({ queryKey: ["teams"], queryFn: fetchTeams, enabled: user.role === "super_admin" });
 
   const { data, isLoading } = useQuery<PerformanceResponse>({
     queryKey: ["performance", isUser ? "me" : team, granularity, user.role],
@@ -69,7 +70,7 @@ export function PerformanceView({ user }: { user: User }) {
           <Select value={team} onValueChange={(v) => setTeam(v as Team)}>
             <SelectTrigger className="w-40 bg-surface border-border"><SelectValue /></SelectTrigger>
             <SelectContent>
-              {TEAMS.map((t) => <SelectItem key={t} value={t}>{t}</SelectItem>)}
+              {teamList.map((t) => <SelectItem key={t.team_id} value={t.team_id}>{t.name}</SelectItem>)}
             </SelectContent>
           </Select>
         )}

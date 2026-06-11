@@ -2,8 +2,12 @@
 // Shared domain types for the CX Audit platform.
 // ---------------------------------------------------------------------------
 
-/** A CX team. Each team owns its own audit rubric. */
-export type Team = "CS" | "RM" | "OORP" | "Escalations";
+/**
+ * A CX team, identified by its slug (the `team_id`). Teams are created at
+ * runtime by a super_admin (no longer a fixed enum), so this is an open string.
+ * The original built-in teams are CS / RM / OORP / Escalations.
+ */
+export type Team = string;
 
 /** RBAC roles. See docs/RBAC.md for the full permission matrix. */
 export type Role = "super_admin" | "admin" | "user";
@@ -51,12 +55,32 @@ export interface Criterion {
 }
 
 /**
- * A team's audit rubric. Owned and edited by that team's admin (or any
- * super_admin). Stored in the Teams table. Flexible by design — criteria,
- * weights, scale, and thresholds are all editable.
+ * Per-team infrastructure overrides, supplied by the super_admin when
+ * onboarding a team whose recordings live in their own S3 bucket / flow through
+ * their own SQS queues. Any field left unset falls back to the global `env`
+ * value, so the original shared teams keep working with no config. DynamoDB
+ * tables stay global (shared, partitioned by team) — only the ingestion path
+ * (buckets + queues + worker tuning) is per-team.
+ */
+export interface TeamInfra {
+  recording_bucket?: string;        // S3 bucket the team's recordings land in
+  output_bucket?: string;           // S3 bucket for this team's transcripts + audit docs
+  transcription_queue_url?: string; // SQS queue fed by the team's recording bucket
+  audit_queue_url?: string;         // SQS queue the transcribe stage hands off to
+  batch_size?: number;              // SQS messages pulled per poll (1-10)
+  wait_time_seconds?: number;       // SQS long-poll wait (0-20)
+  max_receive_count?: number;       // deliveries before DLQ (must match the queue's redrive policy)
+  worker_concurrency?: number;      // parallel jobs per worker loop for this team's queue
+}
+
+/**
+ * A team record. Owns the team's audit rubric (single rubric today; becomes
+ * many in a later change) AND its optional per-team infrastructure config.
+ * Created/edited by a super_admin (rubric also editable by the team's admin).
+ * Stored in the Teams table; `team_id` is the slug primary key.
  */
 export interface TeamRubric {
-  team_id: Team;                       // partition key
+  team_id: Team;                       // partition key (slug, e.g. "Sales")
   name: string;
   description: string;
   criteria: Criterion[];
@@ -64,6 +88,10 @@ export interface TeamRubric {
   scale_max?: number;                  // max score per criterion (default 100)
   flag_threshold: number;              // overall score below this => flagged (default 70)
   critical_criterion_threshold: number; // any criterion below this => flagged (default 60)
+  infra?: TeamInfra;                   // per-team buckets/queues/tuning (env fallback)
+  active?: boolean;                    // soft-disable without deleting (default true)
+  created_at?: string;
+  created_by?: string | null;
   updated_at: string;
   updated_by: string | null;
 }

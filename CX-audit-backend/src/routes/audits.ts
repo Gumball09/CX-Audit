@@ -6,9 +6,7 @@ import { auditScope } from "../services/rbac.js";
 import { sendMessage } from "../lib/sqs.js";
 import { getTranscription } from "../lib/s3.js";
 import { getAudit, listAudits, setStatus, type AuditScope } from "../db/audits.js";
-import type { AuditRecord, Team, User } from "../types.js";
-
-const TEAMS: Team[] = ["CS", "RM", "OORP", "Escalations"];
+import type { AuditRecord, User } from "../types.js";
 
 export const auditsRouter = Router();
 
@@ -36,7 +34,8 @@ auditsRouter.get("/", async (req, res) => {
 
   let scope: AuditScope;
   if (view === "all") {
-    scope = team && TEAMS.includes(team as Team) ? { kind: "team", team: team as Team } : { kind: "all" };
+    // super_admin: optional team filter (any team slug); otherwise all teams.
+    scope = team ? { kind: "team", team } : { kind: "all" };
   } else if (view === "team") {
     if (!user.team) return res.json({ items: [] });
     scope = { kind: "team", team: user.team };
