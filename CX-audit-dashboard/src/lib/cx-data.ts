@@ -61,6 +61,34 @@ export interface CriterionScore {
   explanation: string;
 }
 
+/** An additional, named rubric attached to a team (beyond the primary). */
+export interface Rubric {
+  rubric_id: string;
+  team_id: Team;
+  name: string;
+  description?: string;
+  criteria: Criterion[];
+  system_prompt: string;
+  scale_max?: number;
+  flag_threshold: number;
+  critical_criterion_threshold: number;
+  active: boolean;
+  created_at?: string;
+  created_by?: string | null;
+  updated_at?: string;
+  updated_by?: string | null;
+}
+
+/** Per-rubric audit outcome (one entry per rubric a call was scored against). */
+export interface RubricResult {
+  rubric_id: string;
+  rubric_name: string;
+  score: number;
+  flagged: boolean;
+  flag_reason: string;
+  criteria_scores: CriterionScore[];
+}
+
 export type AuditStatus =
   | "queued"
   | "transcribing"
@@ -89,6 +117,7 @@ export interface Audit {
   flagged?: boolean;
   flag_reason?: string;
   criteria_scores?: CriterionScore[];
+  rubric_results?: RubricResult[];   // per-rubric breakdown (primary + additional)
   created_at: string;
   transcribed_at?: string;
   audited_at?: string;

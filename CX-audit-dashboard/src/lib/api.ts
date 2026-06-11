@@ -6,6 +6,7 @@ import type {
   PlatformSettings,
   RecordingPattern,
   Role,
+  Rubric,
   Team,
   TeamRubric,
   User,
@@ -183,6 +184,24 @@ export function updateTeam(teamId: Team, patch: Partial<TeamRubric>): Promise<Te
     method: "PATCH",
     body: JSON.stringify(patch),
   });
+}
+
+// ---- additional rubrics (per team) ---------------------------------------
+
+export function fetchRubrics(teamId: Team): Promise<Rubric[]> {
+  return request<Rubric[]>(`/rubrics?team=${encodeURIComponent(teamId)}`);
+}
+
+export function createRubric(rubric: Partial<Rubric> & { team_id: Team; name: string }): Promise<Rubric> {
+  return request<Rubric>("/rubrics", { method: "POST", body: JSON.stringify(rubric) });
+}
+
+export function updateRubric(rubricId: string, patch: Partial<Rubric>): Promise<Rubric> {
+  return request<Rubric>(`/rubrics/${encodeURIComponent(rubricId)}`, { method: "PATCH", body: JSON.stringify(patch) });
+}
+
+export function deleteRubric(rubricId: string): Promise<{ ok: boolean }> {
+  return request(`/rubrics/${encodeURIComponent(rubricId)}`, { method: "DELETE" });
 }
 
 // ---- recording patterns (super_admin) ------------------------------------

@@ -83,6 +83,8 @@ export const env = {
   // Holds the singleton platform settings row (e.g. the OpenAI models the
   // super_admin selects at runtime). `OPENAI_*_MODEL` above are the fallbacks.
   DDB_SETTINGS_TABLE: getEnv("DDB_SETTINGS_TABLE", false, "cx_settings"),
+  // Additional per-team rubrics (the team row holds the primary rubric).
+  DDB_RUBRICS_TABLE: getEnv("DDB_RUBRICS_TABLE", false, "cx_rubrics"),
 };
 
 /**

@@ -14,6 +14,7 @@ import { auditsRouter } from "./routes/audits.js";
 import { patternsRouter } from "./routes/patterns.js";
 import { performanceRouter } from "./routes/performance.js";
 import { settingsRouter } from "./routes/settings.js";
+import { rubricsRouter } from "./routes/rubrics.js";
 
 validateEnv("api");
 initSentry("api");
@@ -60,6 +61,7 @@ app.use("/api/audits", authenticate, auditsRouter);
 app.use("/api/patterns", authenticate, patternsRouter);
 app.use("/api/performance", authenticate, performanceRouter);
 app.use("/api/settings", authenticate, settingsRouter);
+app.use("/api/rubrics", authenticate, rubricsRouter);
 
 // 404 + error handlers.
 app.use((req: Request, res: Response) =>

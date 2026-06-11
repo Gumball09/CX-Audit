@@ -119,6 +119,23 @@ const tables: CreateTableCommandInput[] = [
     AttributeDefinitions: [{ AttributeName: "setting_id", AttributeType: S }],
     KeySchema: [{ AttributeName: "setting_id", KeyType: "HASH" }],
   },
+  {
+    // Additional per-team rubrics (team-index GSI to list by team).
+    TableName: env.DDB_RUBRICS_TABLE,
+    BillingMode: PAY,
+    AttributeDefinitions: [
+      { AttributeName: "rubric_id", AttributeType: S },
+      { AttributeName: "team_id", AttributeType: S },
+    ],
+    KeySchema: [{ AttributeName: "rubric_id", KeyType: "HASH" }],
+    GlobalSecondaryIndexes: [
+      {
+        IndexName: "team-index",
+        KeySchema: [{ AttributeName: "team_id", KeyType: "HASH" }],
+        Projection: { ProjectionType: "ALL" },
+      },
+    ],
+  },
 ];
 
 async function createTables() {

@@ -214,7 +214,34 @@ function AuditDrawer({ audit, agentName, canReaudit, onClose }: { audit: Audit |
               </section>
             )}
 
-            {audit.criteria_scores && audit.criteria_scores.length > 0 && (
+            {/* Per-rubric breakdown when present; fall back to the flat criteria list for older audits. */}
+            {audit.rubric_results && audit.rubric_results.length > 0 ? (
+              <section className="px-6 py-4 border-b border-border space-y-5">
+                <h3 className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">Audit Breakdown · {audit.rubric_results.length} rubric(s)</h3>
+                {audit.rubric_results.map((r) => (
+                  <div key={r.rubric_id} className="space-y-3">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-semibold">{r.rubric_name}</span>
+                      {r.rubric_id === "primary" && <span className="font-mono text-[9px] uppercase px-1.5 py-0.5 border border-border text-muted-foreground rounded-sm">primary</span>}
+                      {r.flagged && <span className="font-mono text-[9px] uppercase px-1.5 py-0.5 border border-[color:var(--escalations)]/40 text-[color:var(--escalations)] rounded-sm">flagged</span>}
+                      <span className={cn("ml-auto font-mono text-xs px-2 py-0.5 border rounded-sm", scoreColor(r.score))}>{r.score}</span>
+                    </div>
+                    {r.flagged && r.flag_reason && <p className="text-xs text-[color:var(--escalations)] leading-relaxed">{r.flag_reason}</p>}
+                    <ul className="space-y-2">
+                      {r.criteria_scores.map((c) => (
+                        <li key={c.name} className="border border-border rounded-md p-3 bg-background">
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="text-sm font-medium">{c.name}</span>
+                            <span className={cn("font-mono text-xs px-2 py-0.5 border rounded-sm", scoreColor(c.score))}>{c.score}</span>
+                          </div>
+                          <p className="text-xs text-muted-foreground leading-relaxed">{c.explanation}</p>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ))}
+              </section>
+            ) : audit.criteria_scores && audit.criteria_scores.length > 0 ? (
               <section className="px-6 py-4 border-b border-border">
                 <h3 className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground mb-3">Audit Breakdown</h3>
                 <ul className="space-y-3">
@@ -229,7 +256,7 @@ function AuditDrawer({ audit, agentName, canReaudit, onClose }: { audit: Audit |
                   ))}
                 </ul>
               </section>
-            )}
+            ) : null}
 
             {audit.transcription_key && (
               <section className="px-6 py-4 border-b border-border">
