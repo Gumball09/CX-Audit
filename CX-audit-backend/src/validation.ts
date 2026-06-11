@@ -60,3 +60,11 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 export function isEmail(value: unknown): value is string {
   return typeof value === "string" && EMAIL_RE.test(value);
 }
+
+/** Minimum password length for the self-service set-password flow. */
+export const MIN_PASSWORD_LENGTH = 8;
+
+/** A login password must be a string of at least MIN_PASSWORD_LENGTH chars. */
+export function isValidPassword(value: unknown): value is string {
+  return typeof value === "string" && value.length >= MIN_PASSWORD_LENGTH;
+}

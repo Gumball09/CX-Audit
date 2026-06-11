@@ -13,12 +13,15 @@ CREATE TABLE IF NOT EXISTS cx_users (
   team        text,
   agent_id    text,
   status      text NOT NULL DEFAULT 'active',
+  password_hash text,
   created_at  text NOT NULL,
   created_by  text,
   updated_at  text NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS cx_users_email_idx ON cx_users (email);
 CREATE INDEX IF NOT EXISTS cx_users_agent_idx ON cx_users (agent_id);
+-- Add password_hash to tables created before passwords existed (idempotent).
+ALTER TABLE cx_users ADD COLUMN IF NOT EXISTS password_hash text;
 
 -- 2. Teams — one rubric per team
 CREATE TABLE IF NOT EXISTS cx_teams (

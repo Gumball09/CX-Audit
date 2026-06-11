@@ -28,19 +28,28 @@ export async function listUsers(): Promise<User[]> {
 export async function putUser(user: User): Promise<User> {
   await execute(
     `INSERT INTO cx_users
-       (user_id, email, name, role, team, agent_id, status, created_at, created_by, updated_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+       (user_id, email, name, role, team, agent_id, status, password_hash, created_at, created_by, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
      ON CONFLICT (user_id) DO UPDATE SET
        email = EXCLUDED.email, name = EXCLUDED.name, role = EXCLUDED.role,
        team = EXCLUDED.team, agent_id = EXCLUDED.agent_id, status = EXCLUDED.status,
+       password_hash = EXCLUDED.password_hash,
        created_at = EXCLUDED.created_at, created_by = EXCLUDED.created_by,
        updated_at = EXCLUDED.updated_at`,
     [
       user.user_id, user.email.toLowerCase(), user.name, user.role, user.team,
-      user.agent_id, user.status, user.created_at, user.created_by, user.updated_at,
+      user.agent_id, user.status, user.password_hash ?? null, user.created_at, user.created_by, user.updated_at,
     ]
   );
   return user;
+}
+
+/** Set (or replace) a user's bcrypt password hash. Returns the updated row. */
+export async function setUserPassword(userId: string, passwordHash: string): Promise<User | null> {
+  return queryOne<User>(
+    "UPDATE cx_users SET password_hash = $1, updated_at = $2 WHERE user_id = $3 RETURNING *",
+    [passwordHash, new Date().toISOString(), userId]
+  );
 }
 
 export async function updateUser(
