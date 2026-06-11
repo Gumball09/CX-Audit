@@ -11,6 +11,8 @@ RUN npm run build
 FROM node:20-alpine AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
+# ffmpeg/ffprobe power the long-recording chunking fallback (src/lib/audio.ts).
+RUN apk add --no-cache ffmpeg
 COPY package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=build /app/dist ./dist
