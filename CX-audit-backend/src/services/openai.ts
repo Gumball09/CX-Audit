@@ -2,6 +2,7 @@ import { OpenAI, toFile } from "openai";
 import { env } from "../env.js";
 import { logger } from "../logger.js";
 import { normalizeWeights } from "../validation.js";
+import { splitAudioOnSilence } from "../lib/audio.js";
 import type { CriterionScore, Feedback, SuggestedCriterionChange, TeamRubric } from "../types.js";
 
 // auditTranscript works on any rubric-shaped object — the team's primary rubric
@@ -32,13 +33,68 @@ export async function transcribeAudio(
     return `[STUB TRANSCRIPT for ${fileName}] Agent: Hello, thank you for calling. Customer: Hi, I have a question about my course. Agent: Sure, I can help with that.`;
   }
 
+  try {
+    return await transcribeOnce(buffer, fileName, model);
+  } catch (err) {
+    if (!isInputTooLargeError(err)) throw err;
+    logger.warn(
+      `"${fileName}" exceeds the ${model} input limit — falling back to silence-based chunked transcription`
+    );
+    return await transcribeChunked(buffer, fileName, model);
+  }
+}
+
+/** Single one-shot transcription request. */
+async function transcribeOnce(buffer: Buffer, fileName: string, model: string): Promise<string> {
   const file = await toFile(buffer, fileName);
-  const res = await openai.audio.transcriptions.create({
-    file,
-    model,
-  });
-  logger.debug(`Transcription complete (${res.text.length} chars)`);
+  const res = await openai!.audio.transcriptions.create({ file, model });
+  logger.debug(`Transcription complete (${(res.text ?? "").length} chars)`);
   return res.text ?? "";
+}
+
+/**
+ * True when a transcription call failed because the audio is too long/large for
+ * the model's input limit (vs. an auth/quota/transient error we must rethrow).
+ */
+function isInputTooLargeError(err: any): boolean {
+  const status = err?.status ?? err?.response?.status;
+  const msg = String(err?.message ?? err?.error?.message ?? "").toLowerCase();
+  if (status !== 400) return false;
+  return (
+    msg.includes("too large") ||
+    msg.includes("too long") ||
+    msg.includes("maximum") ||
+    msg.includes("number of tokens") ||
+    msg.includes("duration")
+  );
+}
+
+/**
+ * Split a too-long recording on silence and transcribe each chunk with the same
+ * (higher-quality) model, then stitch the parts back together in order.
+ */
+async function transcribeChunked(buffer: Buffer, fileName: string, model: string): Promise<string> {
+  const chunks = await splitAudioOnSilence(buffer, fileName, {
+    targetSec: env.TRANSCRIPTION_CHUNK_SECONDS,
+    maxSec: env.TRANSCRIPTION_CHUNK_MAX_SECONDS,
+    silenceDb: env.TRANSCRIPTION_SILENCE_DB,
+    minSilenceSec: env.TRANSCRIPTION_SILENCE_MIN_SECONDS,
+  });
+  if (chunks.length <= 1) {
+    throw new Error(
+      `Chunking produced ${chunks.length} chunk(s) for "${fileName}" — cannot reduce it below the ${model} limit.`
+    );
+  }
+  logger.info(`Transcribing "${fileName}" as ${chunks.length} chunks (model ${model})`);
+
+  const parts: string[] = [];
+  for (const chunk of chunks) {
+    const text = await transcribeOnce(chunk.buffer, chunk.fileName, model);
+    parts.push(text.trim());
+  }
+  const stitched = parts.filter(Boolean).join(" ");
+  logger.debug(`Chunked transcription complete (${stitched.length} chars from ${chunks.length} chunks)`);
+  return stitched;
 }
 
 export interface AuditResult {

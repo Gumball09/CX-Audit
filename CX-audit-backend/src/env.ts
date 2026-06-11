@@ -70,6 +70,19 @@ export const env = {
   OPENAI_TRANSCRIPTION_MODEL: getEnv("OPENAI_TRANSCRIPTION_MODEL", false, "whisper-1"),
   OPENAI_AUDIT_MODEL: getEnv("OPENAI_AUDIT_MODEL", false, "gpt-4-turbo-preview"),
 
+  // ---- Transcription chunking (long-audio fallback) ----
+  // Recordings that exceed the transcription model's input limit (e.g.
+  // gpt-4o-mini-transcribe rejects long calls) are split into chunks on natural
+  // silence and transcribed piecewise, then stitched. These tune the split.
+  // Target chunk length in seconds (the splitter aims for cuts near this).
+  TRANSCRIPTION_CHUNK_SECONDS: Number(getEnv("TRANSCRIPTION_CHUNK_SECONDS", false, "600")),
+  // Hard ceiling on a chunk: if no silence is found before this, cut anyway.
+  TRANSCRIPTION_CHUNK_MAX_SECONDS: Number(getEnv("TRANSCRIPTION_CHUNK_MAX_SECONDS", false, "900")),
+  // silencedetect threshold (dB below which audio counts as silence).
+  TRANSCRIPTION_SILENCE_DB: Number(getEnv("TRANSCRIPTION_SILENCE_DB", false, "-30")),
+  // Minimum silence duration (seconds) to qualify as a cut candidate.
+  TRANSCRIPTION_SILENCE_MIN_SECONDS: Number(getEnv("TRANSCRIPTION_SILENCE_MIN_SECONDS", false, "0.6")),
+
   // ---- Sentry (error/alert reporting) ----
   // Leave SENTRY_DSN blank to disable reporting entirely (local/stub mode).
   SENTRY_DSN: getEnv("SENTRY_DSN", false),
