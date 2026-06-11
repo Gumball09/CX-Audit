@@ -15,9 +15,27 @@ const TABLE = env.DDB_AUDITS_TABLE;
 const DEFAULT_LIMIT = 200;
 const MAX_LIMIT = 1000;
 
+/**
+ * `team` is the team-index GSI key and `agent_id` the agent-index key; DynamoDB
+ * forbids NULL on a GSI key attribute. Omit them when unset (e.g. a recording
+ * whose agent isn't mapped to a team) so the indexes stay sparse.
+ */
+function toItem(record: AuditRecord): Record<string, unknown> {
+  const item: Record<string, unknown> = { ...record };
+  if (item.team == null) delete item.team;
+  if (item.agent_id == null) delete item.agent_id;
+  return item;
+}
+
+/** Restore the API contract (team is `null`, never `undefined`). */
+function fromItem(item: Record<string, unknown> | undefined): AuditRecord | null {
+  if (!item) return null;
+  return { ...(item as unknown as AuditRecord), team: (item.team as string) ?? null };
+}
+
 export async function getAudit(auditId: string): Promise<AuditRecord | null> {
   const res = await ddb.send(new GetCommand({ TableName: TABLE, Key: { audit_id: auditId } }));
-  return (res.Item as AuditRecord) ?? null;
+  return fromItem(res.Item);
 }
 
 /**
@@ -30,7 +48,7 @@ export async function createAuditIfAbsent(record: AuditRecord): Promise<boolean>
     await ddb.send(
       new PutCommand({
         TableName: TABLE,
-        Item: record,
+        Item: toItem(record),
         ConditionExpression: "attribute_not_exists(audit_id)",
       })
     );
@@ -46,27 +64,34 @@ export async function updateAudit(
   patch: Partial<AuditRecord>
 ): Promise<AuditRecord | null> {
   const sets: string[] = ["updated_at = :u"];
+  const removes: string[] = [];
   const values: Record<string, unknown> = { ":u": new Date().toISOString() };
   const names: Record<string, string> = {};
 
   for (const [k, v] of Object.entries(patch)) {
     if (v === undefined || k === "audit_id") continue;
-    sets.push(`#${k} = :${k}`);
     names[`#${k}`] = k;
+    // team / agent_id are GSI keys: clearing one must REMOVE it (no NULL key).
+    if ((k === "team" || k === "agent_id") && v == null) {
+      removes.push(`#${k}`);
+      continue;
+    }
+    sets.push(`#${k} = :${k}`);
     values[`:${k}`] = v;
   }
 
+  const expr = `SET ${sets.join(", ")}` + (removes.length ? ` REMOVE ${removes.join(", ")}` : "");
   const res = await ddb.send(
     new UpdateCommand({
       TableName: TABLE,
       Key: { audit_id: auditId },
-      UpdateExpression: `SET ${sets.join(", ")}`,
+      UpdateExpression: expr,
       ExpressionAttributeNames: names,
       ExpressionAttributeValues: values,
       ReturnValues: "ALL_NEW",
     })
   );
-  return (res.Attributes as AuditRecord) ?? null;
+  return fromItem(res.Attributes);
 }
 
 export async function setStatus(auditId: string, status: AuditStatus, error?: string) {
@@ -143,7 +168,7 @@ export async function listAudits(scope: AuditScope, q: AuditQuery = {}): Promise
       ExpressionAttributeValues: Object.keys(values).length ? values : undefined,
     };
     const res = await ddb.send(new ScanCommand(input));
-    return { items: (res.Items as AuditRecord[]) ?? [], nextCursor: encodeCursor(res.LastEvaluatedKey) };
+    return { items: ((res.Items as Record<string, unknown>[]) ?? []).map((i) => fromItem(i)!), nextCursor: encodeCursor(res.LastEvaluatedKey) };
   }
 
   // team / agent -> GSI query with optional date range on the sort key.
@@ -173,5 +198,5 @@ export async function listAudits(scope: AuditScope, q: AuditQuery = {}): Promise
     ExclusiveStartKey: start,
   };
   const res = await ddb.send(new QueryCommand(input));
-  return { items: (res.Items as AuditRecord[]) ?? [], nextCursor: encodeCursor(res.LastEvaluatedKey) };
+  return { items: ((res.Items as Record<string, unknown>[]) ?? []).map((i) => fromItem(i)!), nextCursor: encodeCursor(res.LastEvaluatedKey) };
 }
