@@ -61,6 +61,21 @@ export async function putUser(user: User): Promise<User> {
   return user;
 }
 
+/** Set (or replace) a user's bcrypt password hash. Returns the updated row. */
+export async function setUserPassword(userId: string, passwordHash: string): Promise<User | null> {
+  const res = await ddb.send(
+    new UpdateCommand({
+      TableName: TABLE,
+      Key: { user_id: userId },
+      UpdateExpression: "SET password_hash = :p, updated_at = :u",
+      ExpressionAttributeValues: { ":p": passwordHash, ":u": new Date().toISOString() },
+      ConditionExpression: "attribute_exists(user_id)",
+      ReturnValues: "ALL_NEW",
+    })
+  );
+  return (res.Attributes as User) ?? null;
+}
+
 export async function updateUser(
   userId: string,
   patch: Partial<Pick<User, "name" | "role" | "team" | "agent_id" | "status">>

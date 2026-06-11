@@ -79,15 +79,19 @@ export function CallAuditsView({ user, users }: { user: User; users: User[] }) {
   return (
     <div className="p-6">
       <div className="flex flex-wrap items-end gap-3 mb-6">
-        <Field label="Team">
-          <Select value={team} onValueChange={(v) => setTeam(v as Team | "All")}>
-            <SelectTrigger className="w-[160px] bg-surface border-border font-mono text-xs h-9"><SelectValue /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="All">All</SelectItem>
-              {TEAMS.map((t) => <SelectItem key={t} value={t}>{t}</SelectItem>)}
-            </SelectContent>
-          </Select>
-        </Field>
+        {/* Team filter is only meaningful for super_admins (who see every team).
+            Admins are pinned to their own team and users to their own calls. */}
+        {canSeeAdmin(user.role) && (
+          <Field label="Team">
+            <Select value={team} onValueChange={(v) => setTeam(v as Team | "All")}>
+              <SelectTrigger className="w-[160px] bg-surface border-border font-mono text-xs h-9"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="All">All</SelectItem>
+                {TEAMS.map((t) => <SelectItem key={t} value={t}>{t}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          </Field>
+        )}
         <Field label="From">
           <Input type="date" value={from} onChange={(e) => setFrom(e.target.value)} className="w-[150px] bg-surface border-border font-mono text-xs h-9" />
         </Field>

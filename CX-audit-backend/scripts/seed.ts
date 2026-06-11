@@ -11,11 +11,16 @@ import { putTeam } from "../src/db/teams.js";
 import { putUser, newUserId, getUserByEmail } from "../src/db/users.js";
 import { getPattern, putPattern } from "../src/db/patterns.js";
 import { BUILTIN_PATTERN_SOURCE } from "../src/lib/filename.js";
+import { hashPassword } from "../src/lib/password.js";
 import type { RecordingPattern, TeamRubric, User } from "../src/types.js";
 
 const BUILTIN_PATTERN_ID = "PAT-builtin";
 
 const SUPER_ADMIN_EMAIL = process.env.SEED_SUPER_ADMIN_EMAIL ?? "shubh.mehrotra@scaler.com";
+// Default password given to the seeded bootstrap accounts so you can log in
+// immediately. Override via env; change it after first login. Accounts created
+// later through the dashboard start password-less (self-service first-login).
+const SEED_PASSWORD = process.env.SEED_PASSWORD ?? "Scaler@123";
 const now = () => new Date().toISOString();
 
 const rubrics: TeamRubric[] = [
@@ -96,6 +101,9 @@ const sampleAgents: Array<Pick<User, "name" | "email" | "team" | "agent_id">> = 
 
 async function seedUser(u: Partial<User> & { email: string; name: string; role: User["role"] }) {
   const existing = await getUserByEmail(u.email);
+  // Preserve a password the account already has; otherwise seed the default so
+  // bootstrap accounts can log in right away.
+  const password_hash = existing?.password_hash ?? (await hashPassword(SEED_PASSWORD));
   const user: User = {
     user_id: existing?.user_id ?? newUserId(),
     email: u.email.toLowerCase(),
@@ -104,6 +112,7 @@ async function seedUser(u: Partial<User> & { email: string; name: string; role: 
     team: u.team ?? null,
     agent_id: u.agent_id ?? null,
     status: "active",
+    password_hash,
     created_at: existing?.created_at ?? now(),
     created_by: existing?.created_by ?? null,
     updated_at: now(),
@@ -139,7 +148,8 @@ async function main() {
   await seedBuiltinPattern();
   await seedUser({ email: SUPER_ADMIN_EMAIL, name: "Platform Owner", role: "super_admin" });
   for (const a of sampleAgents) await seedUser({ ...a, role: "user" });
-  console.log("\nSeed complete.");
+  console.log(`\nSeeded accounts have password: ${SEED_PASSWORD}  (change it after first login)`);
+  console.log("Seed complete.");
 }
 
 main().catch((err) => {

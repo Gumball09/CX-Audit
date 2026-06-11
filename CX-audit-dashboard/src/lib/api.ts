@@ -55,13 +55,33 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 // ---- auth ----------------------------------------------------------------
 
-export async function login(email: string): Promise<{ token: string; user: User }> {
-  const result = await request<{ token: string; user: User }>("/auth/login", {
+export type LoginResult =
+  | { user: User }                 // signed in (token stored)
+  | { needsPasswordSetup: true };  // first login — caller should collect a new password
+
+/**
+ * Email + password login. If the account has no password yet (first login),
+ * the API returns { needs_password_setup: true } and we surface that so the UI
+ * can switch to the set-password step.
+ */
+export async function login(email: string, password: string): Promise<LoginResult> {
+  const result = await request<{ token?: string; user?: User; needs_password_setup?: boolean }>(
+    "/auth/login",
+    { method: "POST", body: JSON.stringify({ email, password }) }
+  );
+  if (result.needs_password_setup) return { needsPasswordSetup: true };
+  setToken(result.token!);
+  return { user: result.user! };
+}
+
+/** Self-service first login: set the initial password and sign in. */
+export async function setPassword(email: string, password: string): Promise<{ user: User }> {
+  const result = await request<{ token: string; user: User }>("/auth/set-password", {
     method: "POST",
-    body: JSON.stringify({ email }),
+    body: JSON.stringify({ email, password }),
   });
   setToken(result.token);
-  return result;
+  return { user: result.user };
 }
 
 export function fetchMe(): Promise<User> {
