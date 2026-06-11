@@ -28,11 +28,23 @@ check("ABAB scores high", repetitionScore(abab) > 0.9, `score=${repetitionScore(
 const ababC = collapseRepetitions(abab);
 check("ABAB collapses to 2", ababC.split(/(?<=[.?!])\s+/).filter(Boolean).length === 2, `-> "${ababC}"`);
 
-// Real backchannel repeats spread apart survive (window-limited collapse).
-const spread = Array.from({ length: 6 }, (_, i) =>
-  `Okay. Point number ${i} is about the placement support and the interview process here.`
-).join(" ");
-check("spread-out repeats survive", collapseRepetitions(spread).includes("Point number 5"));
+// Genuinely distinct long sentences (low mutual similarity) all survive.
+const distinct =
+  "The customer asked whether transferring their enrolled course to another student is possible. " +
+  "They also complained that placement support never scheduled the Hyderabad interview properly. " +
+  "Finally they reported scoring sixty nine on the second coding challenge round.";
+const distinctC = collapseRepetitions(distinct);
+check("distinct long content survives", distinctC.includes("Hyderabad") && distinctC.includes("sixty nine"));
+
+// Paraphrased "restart" loop (near-verbatim, spread apart) collapses to one.
+const para =
+  "Hello, so you are saying that just to transfer the course it is going to cost me one point three lakh rupees additional. " +
+  "There is a separate charge for that and I will take it up with the team and get back to you. " +
+  "Hello, so you are saying that just to transfer the course it is going to cost me one point three four lakh rupees additional. " +
+  "Separately, I scored sixty nine on the coding round two test which I cleared.";
+const paraC = collapseRepetitions(para, { nearDupSimilarity: 0.8 });
+check("paraphrased restart collapsed", (paraC.match(/transfer the course/g) || []).length === 1, paraC.slice(0, 140));
+check("distinct content kept after fuzzy", paraC.includes("coding round two"));
 
 console.log(pass ? "\nPASS" : "\nFAIL");
 process.exit(pass ? 0 : 1);

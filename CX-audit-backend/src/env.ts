@@ -90,6 +90,9 @@ export const env = {
   TRANSCRIPTION_MAX_RETRIES: Number(getEnv("TRANSCRIPTION_MAX_RETRIES", false, "3")),
   // Repetition score (0=clean .. 1=fully looped) above which a run is retried.
   TRANSCRIPTION_REPETITION_THRESHOLD: Number(getEnv("TRANSCRIPTION_REPETITION_THRESHOLD", false, "0.3")),
+  // Jaccard similarity at/above which a long sentence is dropped as a near-dup
+  // of an earlier one (collapses paraphrased "restart" loops). 1 = exact-only.
+  TRANSCRIPTION_NEARDUP_SIMILARITY: Number(getEnv("TRANSCRIPTION_NEARDUP_SIMILARITY", false, "0.8")),
 
   // ---- Sentry (error/alert reporting) ----
   // Leave SENTRY_DSN blank to disable reporting entirely (local/stub mode).
