@@ -11,7 +11,13 @@ import { env } from "../env.js";
  */
 const credentials =
   env.AWS_ACCESS_KEY_ID && env.AWS_SECRET_ACCESS_KEY
-    ? { accessKeyId: env.AWS_ACCESS_KEY_ID, secretAccessKey: env.AWS_SECRET_ACCESS_KEY }
+    ? {
+        accessKeyId: env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: env.AWS_SECRET_ACCESS_KEY,
+        // Required when using temporary/STS credentials; omitted (undefined) for
+        // long-lived IAM user keys.
+        sessionToken: env.AWS_SESSION_TOKEN || undefined,
+      }
     : undefined;
 
 // maxAttempts enables the SDK's built-in exponential backoff for throttling and

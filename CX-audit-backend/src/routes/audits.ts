@@ -1,11 +1,13 @@
 import { Router } from "express";
-import { env } from "../env.js";
 import { logger } from "../logger.js";
 import { requireRole } from "../services/auth.js";
 import { auditScope } from "../services/rbac.js";
+import { resolveTeamInfra } from "../services/teamInfra.js";
 import { sendMessage } from "../lib/sqs.js";
 import { getTranscription } from "../lib/s3.js";
+import { resolveRecordingMeta } from "../lib/filename.js";
 import { getAudit, listAudits, setStatus, type AuditScope } from "../db/audits.js";
+import { getUserByAgentId } from "../db/users.js";
 import type { AuditRecord, User } from "../types.js";
 
 export const auditsRouter = Router();
@@ -68,7 +70,8 @@ auditsRouter.get("/:id/transcript", async (req, res) => {
   if (!audit) return res.status(404).json({ message: "Audit not found." });
   if (!canView(req.user!, audit)) return res.status(403).json({ message: "Out of scope." });
   if (!audit.transcription_key) return res.status(404).json({ message: "No transcript yet." });
-  const text = await getTranscription(audit.transcription_key);
+  const infra = await resolveTeamInfra(audit.team);
+  const text = await getTranscription(audit.transcription_key, infra.output_bucket);
   res.json({ audit_id: audit.audit_id, transcript: text });
 });
 
@@ -80,8 +83,12 @@ auditsRouter.get("/:id/transcript", async (req, res) => {
 auditsRouter.post("/reprocess", requireRole("admin", "super_admin"), async (req, res) => {
   const { recording_key } = req.body as { recording_key?: string };
   if (!recording_key) return res.status(400).json({ message: "recording_key required." });
-  await sendMessage(env.SQS_TRANSCRIPTION_QUEUE_URL, { recording_key });
-  logger.info(`Re-queued recording for processing: ${recording_key} by ${req.user!.email}`);
+  // Route to the owning team's transcription queue (agent → team), else global.
+  const meta = await resolveRecordingMeta(recording_key);
+  const team = meta ? (await getUserByAgentId(meta.agent_id))?.team ?? null : null;
+  const infra = await resolveTeamInfra(team);
+  await sendMessage(infra.transcription_queue_url, { recording_key });
+  logger.info(`Re-queued recording for processing: ${recording_key} (team=${team ?? "—"}) by ${req.user!.email}`);
   res.json({ ok: true, queued: recording_key });
 });
 
@@ -97,7 +104,8 @@ auditsRouter.post("/:id/reaudit", requireRole("admin", "super_admin"), async (re
 
   // Reset so the audit worker doesn't skip it as already-complete.
   await setStatus(audit.audit_id, "transcribed");
-  await sendMessage(env.SQS_AUDIT_QUEUE_URL, {
+  const infra = await resolveTeamInfra(audit.team);
+  await sendMessage(infra.audit_queue_url, {
     audit_id: audit.audit_id,
     agent_id: audit.agent_id,
     transcription_key: audit.transcription_key,

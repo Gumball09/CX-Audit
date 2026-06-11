@@ -44,21 +44,21 @@ export async function listRecordingKeys(): Promise<string[]> {
   return keys;
 }
 
-/** Download a recording from the source bucket. */
-export async function getRecordingBuffer(key: string): Promise<Buffer> {
-  const res = await s3.send(new GetObjectCommand({ Bucket: env.S3_RECORDING_BUCKET, Key: key }));
+/** Download a recording. `bucket` defaults to the global recording bucket. */
+export async function getRecordingBuffer(key: string, bucket: string = env.S3_RECORDING_BUCKET): Promise<Buffer> {
+  const res = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
   if (!res.Body) throw new Error(`Recording ${key} returned an empty body`);
   const buffer = await streamToBuffer(res.Body as Readable);
   logger.debug(`Downloaded recording ${key} (${buffer.length} bytes)`);
   return buffer;
 }
 
-/** Persist a transcript under transcriptions/ and return its key. */
-export async function saveTranscription(transcript: string, baseName: string): Promise<string> {
+/** Persist a transcript under transcriptions/. `bucket` defaults to the global output bucket. */
+export async function saveTranscription(transcript: string, baseName: string, bucket: string = env.S3_OUTPUT_BUCKET): Promise<string> {
   const key = `${env.S3_TRANSCRIPTION_PREFIX}${baseName}.txt`;
   await s3.send(
     new PutObjectCommand({
-      Bucket: env.S3_OUTPUT_BUCKET,
+      Bucket: bucket,
       Key: key,
       Body: transcript,
       ContentType: "text/plain; charset=utf-8",
@@ -68,19 +68,19 @@ export async function saveTranscription(transcript: string, baseName: string): P
   return key;
 }
 
-/** Load a previously saved transcript. */
-export async function getTranscription(key: string): Promise<string> {
-  const res = await s3.send(new GetObjectCommand({ Bucket: env.S3_OUTPUT_BUCKET, Key: key }));
+/** Load a previously saved transcript. `bucket` defaults to the global output bucket. */
+export async function getTranscription(key: string, bucket: string = env.S3_OUTPUT_BUCKET): Promise<string> {
+  const res = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
   if (!res.Body) throw new Error(`Transcription ${key} returned an empty body`);
   return streamToString(res.Body as Readable);
 }
 
-/** Persist an audit result document under audits/ and return its key. */
-export async function saveAuditDocument(doc: unknown, baseName: string): Promise<string> {
+/** Persist an audit result document under audits/. `bucket` defaults to the global output bucket. */
+export async function saveAuditDocument(doc: unknown, baseName: string, bucket: string = env.S3_OUTPUT_BUCKET): Promise<string> {
   const key = `${env.S3_AUDIT_PREFIX}${baseName}.json`;
   await s3.send(
     new PutObjectCommand({
-      Bucket: env.S3_OUTPUT_BUCKET,
+      Bucket: bucket,
       Key: key,
       Body: JSON.stringify(doc, null, 2),
       ContentType: "application/json",
