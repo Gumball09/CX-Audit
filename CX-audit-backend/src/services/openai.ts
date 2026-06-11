@@ -44,8 +44,9 @@ export async function transcribeAudio(
     );
     text = await transcribeChunked(buffer, fileName, model);
   }
-  // Final safety net: drop any residual repetition loops the model emitted.
-  return collapseRepetitions(text);
+  // Final safety net: drop any residual repetition loops the model emitted
+  // (dense exact loops + paraphrased "restart" loops).
+  return collapseRepetitions(text, { nearDupSimilarity: env.TRANSCRIPTION_NEARDUP_SIMILARITY });
 }
 
 /** Single one-shot transcription request. */
