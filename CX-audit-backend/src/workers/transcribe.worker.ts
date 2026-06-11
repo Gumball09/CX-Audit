@@ -1,7 +1,7 @@
-import { env, validateEnv } from "../env.js";
+import { validateEnv } from "../env.js";
 import { logger } from "../logger.js";
 import { initSentry, reportCritical, flushSentry } from "../lib/sentry.js";
-import { consume } from "../lib/sqs.js";
+import { consumeAcrossTeams } from "../lib/sqs.js";
 import { processTranscription } from "../services/pipeline.js";
 
 /**
@@ -30,14 +30,16 @@ function extractKeys(body: any): string[] {
 async function main() {
   validateEnv("worker");
   initSentry("transcribe");
-  await consume(env.SQS_TRANSCRIPTION_QUEUE_URL, "transcribe", async (body) => {
+  // Consume the global queue + every active team's own transcription queue.
+  // `teamId` (null = global) tells the pipeline which team's infra to use.
+  await consumeAcrossTeams("transcription", "transcribe", async (body, _raw, teamId) => {
     const keys = extractKeys(body);
     if (keys.length === 0) {
       logger.debug("No recording keys in message; ignoring");
       return;
     }
     for (const key of keys) {
-      await processTranscription(key);
+      await processTranscription(key, teamId);
     }
   });
 }

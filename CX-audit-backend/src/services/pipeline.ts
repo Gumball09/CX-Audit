@@ -15,6 +15,7 @@ import { getTeam } from "../db/teams.js";
 import { createAuditIfAbsent, getAudit, updateAudit, setStatus } from "../db/audits.js";
 import { recordAuditPerformance } from "../db/performance.js";
 import { getModelSettingsCached } from "../db/settings.js";
+import { resolveTeamInfra } from "./teamInfra.js";
 import type { AuditDocument, AuditQueueMessage, AuditRecord } from "../types.js";
 
 /**
@@ -25,7 +26,7 @@ import type { AuditDocument, AuditQueueMessage, AuditRecord } from "../types.js"
  * key: the conditional create guarantees a single audit row, and a recording
  * that is already past `queued` is skipped.
  */
-export async function processTranscription(recordingKey: string): Promise<void> {
+export async function processTranscription(recordingKey: string, queueTeamId: string | null = null): Promise<void> {
   const meta = await resolveRecordingMeta(recordingKey);
   if (!meta) {
     logger.warn(`Ignoring non-recording key: ${recordingKey}`);
@@ -34,18 +35,22 @@ export async function processTranscription(recordingKey: string): Promise<void> 
 
   const auditId = buildAuditId(meta);
 
-  // Resolve the team up front so it is stored on the row for scope queries.
+  // `queueTeamId` is the team that owns the queue this message came off (null =
+  // the shared/global queue). It's authoritative for which infra to use. The
+  // row's `team` is that, falling back to the agent→team mapping for shared
+  // teams on the global queue.
   const agentUser = await getUserByAgentId(meta.agent_id);
-  const team = agentUser?.team ?? null;
+  const team = queueTeamId ?? agentUser?.team ?? null;
   if (!team) {
     logger.warn(`No team mapping for agent ${meta.agent_id} (audit ${auditId})`);
   }
+  const infra = await resolveTeamInfra(queueTeamId);
 
   const now = new Date().toISOString();
   const record: AuditRecord = {
     audit_id: auditId,
     recording_key: recordingKey,
-    recording_url: s3Url(env.S3_RECORDING_BUCKET, recordingKey),
+    recording_url: s3Url(infra.recording_bucket, recordingKey),
     agent_id: meta.agent_id,
     session_id: meta.session_id,
     campaign: meta.campaign,
@@ -68,15 +73,15 @@ export async function processTranscription(recordingKey: string): Promise<void> 
   }
 
   await setStatus(auditId, "transcribing");
-  const buffer = await getRecordingBuffer(recordingKey);
+  const buffer = await getRecordingBuffer(recordingKey, infra.recording_bucket);
   const { transcription_model } = await getModelSettingsCached();
   const transcript = await transcribeAudio(buffer, meta.file_name, transcription_model);
-  const transcriptionKey = await saveTranscription(transcript, auditId);
+  const transcriptionKey = await saveTranscription(transcript, auditId, infra.output_bucket);
 
   await updateAudit(auditId, {
     status: "transcribed",
     transcription_key: transcriptionKey,
-    transcription_url: s3Url(env.S3_OUTPUT_BUCKET, transcriptionKey),
+    transcription_url: s3Url(infra.output_bucket, transcriptionKey),
     transcribed_at: new Date().toISOString(),
   });
 
@@ -85,8 +90,8 @@ export async function processTranscription(recordingKey: string): Promise<void> 
     agent_id: meta.agent_id,
     transcription_key: transcriptionKey,
   };
-  await sendMessage(env.SQS_AUDIT_QUEUE_URL, message);
-  logger.info(`Enqueued ${auditId} for auditing`);
+  await sendMessage(infra.audit_queue_url, message);
+  logger.info(`Enqueued ${auditId} for auditing (team=${team ?? "—"})`);
 }
 
 /**
@@ -119,9 +124,10 @@ export async function processAudit(message: AuditQueueMessage): Promise<void> {
     await setStatus(audit_id, "failed", `No rubric configured for team ${team}.`);
     return;
   }
+  const infra = await resolveTeamInfra(team);
 
   await setStatus(audit_id, "auditing");
-  const transcript = await getTranscription(transcription_key);
+  const transcript = await getTranscription(transcription_key, infra.output_bucket);
   const { audit_model } = await getModelSettingsCached();
   const result = await auditTranscript(transcript, rubric, { audit_id, agent_id, team }, audit_model);
 
@@ -143,13 +149,13 @@ export async function processAudit(message: AuditQueueMessage): Promise<void> {
     transcription_key,
     audited_at: auditedAt,
   };
-  const auditKey = await saveAuditDocument(doc, audit_id);
+  const auditKey = await saveAuditDocument(doc, audit_id, infra.output_bucket);
 
   await updateAudit(audit_id, {
     status: "audited",
     team,
     audit_key: auditKey,
-    audit_url: s3Url(env.S3_OUTPUT_BUCKET, auditKey),
+    audit_url: s3Url(infra.output_bucket, auditKey),
     score: result.score,
     flagged: result.flagged,
     flag_reason: result.flag_reason,

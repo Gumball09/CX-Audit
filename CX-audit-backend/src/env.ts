@@ -32,6 +32,8 @@ export const env = {
   AWS_REGION: getEnv("AWS_REGION", false, "us-east-1"),
   AWS_ACCESS_KEY_ID: getEnv("AWS_ACCESS_KEY_ID", false),
   AWS_SECRET_ACCESS_KEY: getEnv("AWS_SECRET_ACCESS_KEY", false),
+  // Set only when using temporary/STS credentials (e.g. assumed roles, SSO).
+  AWS_SESSION_TOKEN: getEnv("AWS_SESSION_TOKEN", false),
 
   // ---- S3 ----
   // Source bucket holding the raw call recordings (read-only for this app).

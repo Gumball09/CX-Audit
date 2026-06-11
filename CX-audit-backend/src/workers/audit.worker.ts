@@ -1,7 +1,7 @@
-import { env, validateEnv } from "../env.js";
+import { validateEnv } from "../env.js";
 import { logger } from "../logger.js";
 import { initSentry, reportCritical, flushSentry } from "../lib/sentry.js";
-import { consume } from "../lib/sqs.js";
+import { consumeAcrossTeams } from "../lib/sqs.js";
 import { processAudit } from "../services/pipeline.js";
 import type { AuditQueueMessage } from "../types.js";
 
@@ -15,7 +15,9 @@ import type { AuditQueueMessage } from "../types.js";
 async function main() {
   validateEnv("worker");
   initSentry("audit");
-  await consume(env.SQS_AUDIT_QUEUE_URL, "audit", async (body) => {
+  // Consume the global audit queue + every active team's own audit queue.
+  // processAudit resolves the team's output bucket from the audit row itself.
+  await consumeAcrossTeams("audit", "audit", async (body) => {
     const msg = body as AuditQueueMessage;
     if (!msg?.audit_id || !msg?.transcription_key) {
       logger.debug("Malformed audit message; ignoring", body);
