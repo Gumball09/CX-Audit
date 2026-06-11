@@ -4,6 +4,13 @@ import { logger } from "../logger.js";
 import { normalizeWeights } from "../validation.js";
 import type { CriterionScore, TeamRubric } from "../types.js";
 
+// auditTranscript works on any rubric-shaped object — the team's primary rubric
+// (TeamRubric) or an additional Rubric. Both supply these scoring fields.
+export type Scorable = Pick<
+  TeamRubric,
+  "name" | "criteria" | "system_prompt" | "scale_max" | "flag_threshold" | "critical_criterion_threshold"
+>;
+
 export const openai = env.OPENAI_API_KEY
   ? new OpenAI({ apiKey: env.OPENAI_API_KEY, maxRetries: 3, timeout: 120_000 })
   : null;
@@ -48,7 +55,7 @@ export interface AuditResult {
  */
 export async function auditTranscript(
   transcript: string,
-  rubric: TeamRubric,
+  rubric: Scorable,
   meta: { audit_id: string; agent_id: string; team: string },
   model: string = env.OPENAI_AUDIT_MODEL
 ): Promise<AuditResult> {

@@ -13,10 +13,11 @@ import { transcribeAudio, auditTranscript } from "./openai.js";
 import { getUserByAgentId } from "../db/users.js";
 import { getTeam } from "../db/teams.js";
 import { createAuditIfAbsent, getAudit, updateAudit, setStatus } from "../db/audits.js";
+import { listRubricsByTeam } from "../db/rubrics.js";
 import { recordAuditPerformance } from "../db/performance.js";
 import { getModelSettingsCached } from "../db/settings.js";
 import { resolveTeamInfra } from "./teamInfra.js";
-import type { AuditDocument, AuditQueueMessage, AuditRecord } from "../types.js";
+import type { AuditDocument, AuditQueueMessage, AuditRecord, RubricResult } from "../types.js";
 
 /**
  * STAGE 1 — Transcription.
@@ -129,7 +130,35 @@ export async function processAudit(message: AuditQueueMessage): Promise<void> {
   await setStatus(audit_id, "auditing");
   const transcript = await getTranscription(transcription_key, infra.output_bucket);
   const { audit_model } = await getModelSettingsCached();
-  const result = await auditTranscript(transcript, rubric, { audit_id, agent_id, team }, audit_model);
+
+  // Score against the primary rubric (the team row) + every active additional
+  // rubric for the team. Each produces its own RubricResult.
+  const additional = (await listRubricsByTeam(team)).filter((r) => r.active);
+  const scorables = [
+    { rubric_id: "primary", spec: rubric },
+    ...additional.map((r) => ({ rubric_id: r.rubric_id, spec: r })),
+  ];
+
+  const rubricResults: RubricResult[] = [];
+  for (const s of scorables) {
+    const r = await auditTranscript(transcript, s.spec, { audit_id, agent_id, team }, audit_model);
+    rubricResults.push({
+      rubric_id: s.rubric_id,
+      rubric_name: s.spec.name,
+      score: r.score,
+      flagged: r.flagged,
+      flag_reason: r.flag_reason,
+      criteria_scores: r.criteria_scores,
+    });
+  }
+
+  // Top-level summary: primary rubric's score; flagged if ANY rubric flagged.
+  const primary = rubricResults[0];
+  const anyFlagged = rubricResults.some((r) => r.flagged);
+  const flaggedNames = rubricResults.filter((r) => r.flagged).map((r) => r.rubric_name);
+  const topFlagReason = anyFlagged
+    ? `Flagged by: ${flaggedNames.join(", ")}. ${primary.flagged ? primary.flag_reason : ""}`.trim()
+    : primary.flag_reason;
 
   const auditedAt = new Date().toISOString();
   const doc: AuditDocument = {
@@ -141,11 +170,12 @@ export async function processAudit(message: AuditQueueMessage): Promise<void> {
     customer_number: audit.customer_number,
     call_datetime: audit.call_datetime,
     team,
-    rubric_name: rubric.name,
-    score: result.score,
-    flagged: result.flagged,
-    flag_reason: result.flag_reason,
-    criteria_scores: result.criteria_scores,
+    rubric_name: primary.rubric_name,
+    score: primary.score,
+    flagged: anyFlagged,
+    flag_reason: topFlagReason,
+    criteria_scores: primary.criteria_scores,
+    rubric_results: rubricResults,
     transcription_key,
     audited_at: auditedAt,
   };
@@ -156,10 +186,11 @@ export async function processAudit(message: AuditQueueMessage): Promise<void> {
     team,
     audit_key: auditKey,
     audit_url: s3Url(infra.output_bucket, auditKey),
-    score: result.score,
-    flagged: result.flagged,
-    flag_reason: result.flag_reason,
-    criteria_scores: result.criteria_scores,
+    score: primary.score,
+    flagged: anyFlagged,
+    flag_reason: topFlagReason,
+    criteria_scores: primary.criteria_scores,
+    rubric_results: rubricResults,
     audited_at: auditedAt,
   });
 
@@ -170,12 +201,12 @@ export async function processAudit(message: AuditQueueMessage): Promise<void> {
     await recordAuditPerformance({
       agentId: agent_id,
       team,
-      score: result.score,
-      flagged: result.flagged,
+      score: primary.score,
+      flagged: anyFlagged,
       datetimeISO: audit.call_datetime,
     });
     await updateAudit(audit_id, { performance_recorded: true });
   }
 
-  logger.info(`Audited ${audit_id}: score=${result.score} flagged=${result.flagged}`);
+  logger.info(`Audited ${audit_id}: score=${primary.score} flagged=${anyFlagged} (${rubricResults.length} rubric(s))`);
 }

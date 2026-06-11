@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { type User, type Criterion, type Team, type TeamInfra, type TeamRubric } from "@/lib/cx-data";
-import { fetchTeams, updateTeam, createTeam } from "@/lib/api";
+import { type User, type Criterion, type Rubric, type Team, type TeamInfra, type TeamRubric } from "@/lib/cx-data";
+import { fetchTeams, updateTeam, createTeam, fetchRubrics, createRubric, updateRubric, deleteRubric } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { Minus, Plus } from "lucide-react";
+import { Switch } from "@/components/ui/switch";
+import { ChevronDown, ChevronRight, Minus, Plus, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 // The per-team infra fields, with the env var they fall back to when left blank.
@@ -212,6 +213,9 @@ export function AuditPromptsView({ user }: { user: User }) {
               <Textarea value={draft.system_prompt} disabled={!editable} onChange={(e) => setDraft({ ...draft, system_prompt: e.target.value })} className="mt-1 font-mono text-xs bg-[#0D0D0D] border-border focus-visible:ring-primary min-h-[160px]" />
             </div>
 
+            {/* Additional rubrics — every call is scored against the primary (above) + these. */}
+            <RubricsManager teamId={draft.team_id} canEdit={editable} />
+
             {/* Per-team infrastructure — super_admin only. Blank = use the global env default. */}
             {isSuper && (
               <div className="border border-border rounded-md p-4 bg-surface">
@@ -254,6 +258,125 @@ export function AuditPromptsView({ user }: { user: User }) {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * Manages a team's *additional* rubrics (beyond the primary one above). Every
+ * call is scored against the primary + all active additional rubrics.
+ */
+function RubricsManager({ teamId, canEdit }: { teamId: Team; canEdit: boolean }) {
+  const qc = useQueryClient();
+  const { data: rubrics = [] } = useQuery<Rubric[]>({
+    queryKey: ["rubrics", teamId],
+    queryFn: () => fetchRubrics(teamId),
+    enabled: canEdit, // endpoint is admin+; users never see this view anyway
+  });
+  const [newName, setNewName] = useState("");
+  const [openId, setOpenId] = useState<string | null>(null);
+  const invalidate = () => qc.invalidateQueries({ queryKey: ["rubrics", teamId] });
+
+  const addMut = useMutation({
+    mutationFn: () =>
+      createRubric({
+        team_id: teamId,
+        name: newName.trim(),
+        criteria: [{ name: "Quality", weight: 100, description: "Overall quality for this rubric." }],
+        system_prompt: "You are a CX quality auditor. Score the transcript against each criterion.",
+      }),
+    onSuccess: () => { setNewName(""); invalidate(); },
+  });
+  const saveMut = useMutation({
+    mutationFn: (r: Rubric) => updateRubric(r.rubric_id, {
+      name: r.name, system_prompt: r.system_prompt, criteria: r.criteria,
+      flag_threshold: r.flag_threshold, critical_criterion_threshold: r.critical_criterion_threshold,
+      scale_max: r.scale_max, active: r.active,
+    }),
+    onSuccess: invalidate,
+  });
+  const delMut = useMutation({ mutationFn: (id: string) => deleteRubric(id), onSuccess: invalidate });
+
+  if (!canEdit) return null;
+
+  return (
+    <div className="border border-border rounded-md p-4 bg-surface">
+      <div className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground mb-1">Additional Rubrics</div>
+      <p className="font-mono text-[10px] text-muted-foreground/70 mb-3">Each call is scored against the primary rubric above + every active rubric here. A call is flagged if any rubric flags it.</p>
+
+      <div className="space-y-2">
+        {rubrics.map((r) => (
+          <RubricRow
+            key={r.rubric_id}
+            rubric={r}
+            open={openId === r.rubric_id}
+            onToggle={() => setOpenId(openId === r.rubric_id ? null : r.rubric_id)}
+            onSave={(updated) => saveMut.mutate(updated)}
+            onDelete={() => delMut.mutate(r.rubric_id)}
+            onActive={(active) => saveMut.mutate({ ...r, active })}
+          />
+        ))}
+        {rubrics.length === 0 && <div className="font-mono text-[11px] text-muted-foreground/60">No additional rubrics yet.</div>}
+      </div>
+
+      <div className="flex gap-2 mt-3">
+        <Input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="New rubric name (e.g. False Promises)" className="bg-background border-border text-xs h-8" />
+        <Button onClick={() => addMut.mutate()} disabled={!newName.trim() || addMut.isPending} className="h-8 bg-primary text-primary-foreground hover:bg-primary/90 text-xs">
+          <Plus className="h-3.5 w-3.5 mr-1" /> Add
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function RubricRow({
+  rubric, open, onToggle, onSave, onDelete, onActive,
+}: {
+  rubric: Rubric; open: boolean; onToggle: () => void;
+  onSave: (r: Rubric) => void; onDelete: () => void; onActive: (active: boolean) => void;
+}) {
+  const [draft, setDraft] = useState<Rubric>(rubric);
+  useEffect(() => setDraft(rubric), [rubric]);
+  const setC = (i: number, patch: Partial<Criterion>) =>
+    setDraft({ ...draft, criteria: draft.criteria.map((c, idx) => (idx === i ? { ...c, ...patch } : c)) });
+
+  return (
+    <div className="border border-border rounded-md bg-background">
+      <div className="flex items-center gap-2 px-3 py-2">
+        <button onClick={onToggle} className="text-muted-foreground hover:text-foreground">
+          {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+        </button>
+        <span className="text-sm flex-1">{rubric.name}</span>
+        <span className="font-mono text-[10px] text-muted-foreground">{rubric.criteria.length} criteria</span>
+        <Switch checked={rubric.active} onCheckedChange={onActive} />
+        <button onClick={onDelete} aria-label="Delete rubric" className="p-1.5 rounded-sm hover:bg-destructive/10 text-muted-foreground hover:text-destructive">
+          <Trash2 className="h-3.5 w-3.5" />
+        </button>
+      </div>
+      {open && (
+        <div className="px-3 pb-3 space-y-2 border-t border-border pt-2">
+          <Input value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} className="bg-surface border-border text-xs" placeholder="Rubric name" />
+          <div className="flex gap-2">
+            <Input type="number" value={draft.flag_threshold} onChange={(e) => setDraft({ ...draft, flag_threshold: Number(e.target.value) })} className="bg-surface border-border font-mono text-xs w-24" placeholder="flag <" />
+            <Input type="number" value={draft.critical_criterion_threshold} onChange={(e) => setDraft({ ...draft, critical_criterion_threshold: Number(e.target.value) })} className="bg-surface border-border font-mono text-xs w-24" placeholder="critical <" />
+          </div>
+          {draft.criteria.map((c, i) => (
+            <div key={i} className="space-y-1 border border-border/50 rounded-sm p-2">
+              <div className="flex gap-2 items-center">
+                <Input value={c.name} onChange={(e) => setC(i, { name: e.target.value })} placeholder="Criterion" className="bg-surface border-border text-xs flex-1" />
+                <Input type="number" value={c.weight ?? ""} onChange={(e) => setC(i, { weight: e.target.value === "" ? undefined : Number(e.target.value) })} placeholder="wt" className="bg-surface border-border font-mono text-xs w-14" />
+                <button onClick={() => setDraft({ ...draft, criteria: draft.criteria.filter((_, idx) => idx !== i) })} className="p-1.5 text-muted-foreground hover:text-destructive"><Minus className="h-3.5 w-3.5" /></button>
+              </div>
+              <Textarea value={c.description} onChange={(e) => setC(i, { description: e.target.value })} placeholder="Instruction for the auditor…" rows={1} className="bg-surface border-border text-xs" />
+            </div>
+          ))}
+          <div className="flex gap-2">
+            <Button onClick={() => setDraft({ ...draft, criteria: [...draft.criteria, { name: "", weight: 0, description: "" }] })} variant="ghost" className="h-7 border border-border text-xs"><Plus className="h-3 w-3 mr-1" />Criterion</Button>
+          </div>
+          <Textarea value={draft.system_prompt} onChange={(e) => setDraft({ ...draft, system_prompt: e.target.value })} className="font-mono text-xs bg-[#0D0D0D] border-border min-h-[80px]" placeholder="Base instruction for this rubric…" />
+          <Button onClick={() => onSave(draft)} className="h-7 bg-primary text-primary-foreground hover:bg-primary/90 text-xs">Save rubric</Button>
+        </div>
+      )}
     </div>
   );
 }

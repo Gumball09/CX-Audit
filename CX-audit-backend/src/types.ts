@@ -150,6 +150,39 @@ export interface CriterionScore {
 }
 
 /**
+ * An additional, named rubric attached to a team (beyond the team's primary
+ * rubric, which lives on the TeamRubric record). A team can have many. Every
+ * call for the team is audited against the primary rubric + all `active`
+ * additional rubrics. Stored in the Rubrics table.
+ */
+export interface Rubric {
+  rubric_id: string;                    // partition key, e.g. "RUB-<random>"
+  team_id: Team;                        // GSI team-index
+  name: string;
+  description?: string;
+  criteria: Criterion[];
+  system_prompt: string;
+  scale_max?: number;
+  flag_threshold: number;
+  critical_criterion_threshold: number;
+  active: boolean;
+  created_at: string;
+  created_by: string | null;
+  updated_at: string;
+  updated_by: string | null;
+}
+
+/** The audit outcome for a single rubric (one entry per rubric the call is scored against). */
+export interface RubricResult {
+  rubric_id: string;   // "primary" for the team's main rubric, else the Rubric id
+  rubric_name: string;
+  score: number;
+  flagged: boolean;
+  flag_reason: string;
+  criteria_scores: CriterionScore[];
+}
+
+/**
  * The Audits table row. A single row tracks a recording through the whole
  * pipeline; `status` reflects where it is. The heavy artifacts (full
  * transcript, full audit JSON) live in S3 and are referenced by key here.
@@ -173,10 +206,13 @@ export interface AuditRecord {
   audit_key?: string;
   audit_url?: string;
 
+  // Top-level summary: `score` is the PRIMARY rubric's score; `flagged` is true
+  // if ANY rubric flagged the call. Per-rubric detail is in `rubric_results`.
   score?: number;
   flagged?: boolean;
   flag_reason?: string;
-  criteria_scores?: CriterionScore[];
+  criteria_scores?: CriterionScore[];   // primary rubric's criteria scores
+  rubric_results?: RubricResult[];      // one entry per rubric the call was scored against
 
   created_at: string;
   transcribed_at?: string;
@@ -238,11 +274,12 @@ export interface AuditDocument {
   customer_number: string;
   call_datetime: string;
   team: Team | null;
-  rubric_name: string;
-  score: number;
-  flagged: boolean;
+  rubric_name: string;           // primary rubric name
+  score: number;                 // primary rubric score
+  flagged: boolean;              // any rubric flagged
   flag_reason: string;
-  criteria_scores: CriterionScore[];
+  criteria_scores: CriterionScore[]; // primary rubric criteria
+  rubric_results?: RubricResult[];   // full per-rubric breakdown
   transcription_key?: string;
   audited_at: string;
 }
