@@ -85,8 +85,13 @@ export async function processTranscription(recordingKey: string): Promise<void> 
     agent_id: meta.agent_id,
     transcription_key: transcriptionKey,
   };
-  await sendMessage(env.SQS_AUDIT_QUEUE_URL, message);
-  logger.info(`Enqueued ${auditId} for auditing`);
+  if (env.INLINE_PIPELINE) {
+    logger.info(`INLINE: auditing ${auditId} directly (no SQS)`);
+    await processAudit(message);
+  } else {
+    await sendMessage(env.SQS_AUDIT_QUEUE_URL, message);
+    logger.info(`Enqueued ${auditId} for auditing`);
+  }
 }
 
 /**

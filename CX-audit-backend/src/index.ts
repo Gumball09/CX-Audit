@@ -1,3 +1,4 @@
+import "express-async-errors"; // route async-throws/rejections → error handler (not a crash)
 import express, { type Request, type Response, type NextFunction } from "express";
 import cors from "cors";
 import helmet from "helmet";

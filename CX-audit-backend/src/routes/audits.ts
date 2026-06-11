@@ -5,6 +5,7 @@ import { requireRole } from "../services/auth.js";
 import { auditScope } from "../services/rbac.js";
 import { sendMessage } from "../lib/sqs.js";
 import { getTranscription } from "../lib/s3.js";
+import { processTranscription, processAudit } from "../services/pipeline.js";
 import { getAudit, listAudits, setStatus, type AuditScope } from "../db/audits.js";
 import type { AuditRecord, Team, User } from "../types.js";
 
@@ -81,6 +82,14 @@ auditsRouter.get("/:id/transcript", async (req, res) => {
 auditsRouter.post("/reprocess", requireRole("admin", "super_admin"), async (req, res) => {
   const { recording_key } = req.body as { recording_key?: string };
   if (!recording_key) return res.status(400).json({ message: "recording_key required." });
+  if (env.INLINE_PIPELINE) {
+    // Local mode (no SQS): run the full pipeline in-process, fire-and-forget.
+    void processTranscription(recording_key).catch((err) =>
+      logger.error(`Inline pipeline failed for ${recording_key}`, err)
+    );
+    logger.info(`Inline processing started: ${recording_key} by ${req.user!.email}`);
+    return res.json({ ok: true, queued: recording_key, mode: "inline" });
+  }
   await sendMessage(env.SQS_TRANSCRIPTION_QUEUE_URL, { recording_key });
   logger.info(`Re-queued recording for processing: ${recording_key} by ${req.user!.email}`);
   res.json({ ok: true, queued: recording_key });
@@ -98,11 +107,17 @@ auditsRouter.post("/:id/reaudit", requireRole("admin", "super_admin"), async (re
 
   // Reset so the audit worker doesn't skip it as already-complete.
   await setStatus(audit.audit_id, "transcribed");
-  await sendMessage(env.SQS_AUDIT_QUEUE_URL, {
+  const msg = {
     audit_id: audit.audit_id,
     agent_id: audit.agent_id,
     transcription_key: audit.transcription_key,
-  });
+  };
+  if (env.INLINE_PIPELINE) {
+    void processAudit(msg).catch((err) => logger.error(`Inline re-audit failed for ${audit.audit_id}`, err));
+    logger.info(`Inline re-audit started: ${audit.audit_id} by ${req.user!.email}`);
+    return res.json({ ok: true, queued: audit.audit_id, mode: "inline" });
+  }
+  await sendMessage(env.SQS_AUDIT_QUEUE_URL, msg);
   logger.info(`Re-queued audit ${audit.audit_id} by ${req.user!.email}`);
   res.json({ ok: true, queued: audit.audit_id });
 });

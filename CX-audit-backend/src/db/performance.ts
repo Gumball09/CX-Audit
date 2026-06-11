@@ -1,21 +1,16 @@
-import { QueryCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
-import { ddb } from "../lib/aws.js";
-import { env } from "../env.js";
+import { query, execute } from "../lib/db.js";
 import { logger } from "../logger.js";
 import type {
-  PerformanceBucket,
   PerformanceGranularity,
   PerformancePoint,
   PerformanceScopeType,
 } from "../types.js";
 
-const TABLE = env.DDB_PERFORMANCE_TABLE;
 const GRANULARITIES: PerformanceGranularity[] = ["day", "month", "year"];
 
 /** Derive the day/month/year period strings from an ISO datetime. */
 function periodsOf(iso: string): Record<PerformanceGranularity, string> {
-  // iso like 2024-04-01T11:10:09.000Z → "2024-04-01" / "2024-04" / "2024"
-  const date = iso.slice(0, 10);
+  const date = iso.slice(0, 10); // 2024-04-01
   return { day: date, month: date.slice(0, 7), year: date.slice(0, 4) };
 }
 
@@ -27,33 +22,26 @@ async function bumpBucket(
   score: number,
   flagged: boolean
 ): Promise<void> {
-  await ddb.send(
-    new UpdateCommand({
-      TableName: TABLE,
-      Key: { pk: `${scopeType}#${scopeId}`, bucket: `${granularity}#${period}` },
-      UpdateExpression:
-        "ADD call_count :one, score_sum :s, flagged_count :f " +
-        "SET scope_type = :st, scope_id = :sid, granularity = :g, #period = :p, updated_at = :u",
-      ExpressionAttributeNames: { "#period": "period" },
-      ExpressionAttributeValues: {
-        ":one": 1,
-        ":s": score,
-        ":f": flagged ? 1 : 0,
-        ":st": scopeType,
-        ":sid": scopeId,
-        ":g": granularity,
-        ":p": period,
-        ":u": new Date().toISOString(),
-      },
-    })
+  await execute(
+    `INSERT INTO cx_performance
+       (pk, bucket, scope_type, scope_id, granularity, period, call_count, score_sum, flagged_count, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,1,$7,$8,$9)
+     ON CONFLICT (pk, bucket) DO UPDATE SET
+       call_count    = cx_performance.call_count + 1,
+       score_sum     = cx_performance.score_sum + EXCLUDED.score_sum,
+       flagged_count = cx_performance.flagged_count + EXCLUDED.flagged_count,
+       updated_at    = EXCLUDED.updated_at`,
+    [
+      `${scopeType}#${scopeId}`, `${granularity}#${period}`, scopeType, scopeId,
+      granularity, period, score, flagged ? 1 : 0, new Date().toISOString(),
+    ]
   );
 }
 
 /**
- * Fold one completed audit into the performance aggregates. Updates day/month/
- * year buckets for the agent and (when known) the team. `datetimeISO` should be
- * the call datetime so backfills land in the correct historical bucket; falls
- * back to "now" when the call datetime is unknown.
+ * Fold one completed audit into the performance aggregates: day/month/year
+ * buckets for the agent and (when known) the team. Uses the call datetime so
+ * backfills land in the right historical bucket; falls back to "now".
  */
 export async function recordAuditPerformance(input: {
   agentId: string;
@@ -79,9 +67,9 @@ export async function recordAuditPerformance(input: {
 }
 
 /**
- * Return the performance time series for a scope at a granularity, newest last.
- * `from`/`to` are inclusive period strings in the same shape as the granularity
- * (e.g. "2024-01" for month). Computes avg_score from the stored sum/count.
+ * Return the performance time series for a scope at a granularity, oldest first
+ * (natural chart x-axis). `from`/`to` are inclusive period strings matching the
+ * granularity (e.g. "2024-01" for month). Avg is computed from sum/count.
  */
 export async function getPerformanceSeries(
   scopeType: PerformanceScopeType,
@@ -90,30 +78,17 @@ export async function getPerformanceSeries(
   from?: string,
   to?: string
 ): Promise<PerformancePoint[]> {
-  const names: Record<string, string> = {};
-  const values: Record<string, unknown> = { ":pk": `${scopeType}#${scopeId}` };
-  let keyCond = "pk = :pk";
+  const values: unknown[] = [`${scopeType}#${scopeId}`, granularity];
+  let sql =
+    `SELECT period, call_count, score_sum, flagged_count
+     FROM cx_performance
+     WHERE pk = $1 AND granularity = $2`;
+  if (from) { values.push(from); sql += ` AND period >= $${values.length}`; }
+  if (to) { values.push(to); sql += ` AND period <= $${values.length}`; }
+  sql += " ORDER BY period ASC";
 
-  if (from && to) {
-    keyCond += " AND bucket BETWEEN :lo AND :hi";
-    values[":lo"] = `${granularity}#${from}`;
-    values[":hi"] = `${granularity}#${to}`;
-  } else {
-    keyCond += " AND begins_with(bucket, :prefix)";
-    values[":prefix"] = `${granularity}#`;
-  }
-
-  const res = await ddb.send(
-    new QueryCommand({
-      TableName: TABLE,
-      KeyConditionExpression: keyCond,
-      ExpressionAttributeNames: Object.keys(names).length ? names : undefined,
-      ExpressionAttributeValues: values,
-      ScanIndexForward: true, // oldest → newest, natural for a chart x-axis
-    })
-  );
-
-  return ((res.Items as PerformanceBucket[]) ?? []).map((b) => ({
+  const rows = await query<{ period: string; call_count: number; score_sum: number; flagged_count: number }>(sql, values);
+  return rows.map((b) => ({
     period: b.period,
     call_count: b.call_count,
     avg_score: b.call_count > 0 ? Math.round(b.score_sum / b.call_count) : 0,

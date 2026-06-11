@@ -1,10 +1,8 @@
-import { GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
-import { ddb } from "../lib/aws.js";
+import { queryOne, execute } from "../lib/db.js";
 import { env } from "../env.js";
 import { logger } from "../logger.js";
 import type { PlatformSettings } from "../types.js";
 
-const TABLE = env.DDB_SETTINGS_TABLE;
 const SINGLETON = "global";
 const CACHE_TTL_MS = 60_000; // read on the pipeline hot path — cache it
 
@@ -15,8 +13,10 @@ export interface ModelSettings {
 
 /** Read the settings row, filling any missing value from the env fallback. */
 export async function getSettings(): Promise<PlatformSettings> {
-  const res = await ddb.send(new GetCommand({ TableName: TABLE, Key: { setting_id: SINGLETON } }));
-  const item = res.Item as PlatformSettings | undefined;
+  const item = await queryOne<PlatformSettings>(
+    "SELECT * FROM cx_settings WHERE setting_id = $1",
+    [SINGLETON]
+  );
   return {
     setting_id: SINGLETON,
     transcription_model: item?.transcription_model || env.OPENAI_TRANSCRIPTION_MODEL,
@@ -34,7 +34,7 @@ export function invalidateSettingsCache(): void {
 
 /**
  * Resolve the OpenAI models to use, cached for CACHE_TTL_MS. Falls back to the
- * env defaults if the settings table is unavailable, so the pipeline keeps
+ * env defaults if the settings row/table is unavailable, so the pipeline keeps
  * working even before any settings row exists.
  */
 export async function getModelSettingsCached(): Promise<ModelSettings> {
@@ -59,14 +59,23 @@ export async function putSettings(
   updatedBy: string | null
 ): Promise<PlatformSettings> {
   const current = await getSettings();
-  const updated: PlatformSettings = {
+  const merged: PlatformSettings = {
     ...current,
     ...Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)),
     setting_id: SINGLETON,
     updated_at: new Date().toISOString(),
     updated_by: updatedBy,
   };
-  await ddb.send(new PutCommand({ TableName: TABLE, Item: updated }));
+  await execute(
+    `INSERT INTO cx_settings (setting_id, transcription_model, audit_model, updated_at, updated_by)
+     VALUES ($1,$2,$3,$4,$5)
+     ON CONFLICT (setting_id) DO UPDATE SET
+       transcription_model = EXCLUDED.transcription_model,
+       audit_model = EXCLUDED.audit_model,
+       updated_at = EXCLUDED.updated_at,
+       updated_by = EXCLUDED.updated_by`,
+    [merged.setting_id, merged.transcription_model, merged.audit_model, merged.updated_at, merged.updated_by]
+  );
   invalidateSettingsCache();
-  return updated;
+  return merged;
 }

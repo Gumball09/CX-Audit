@@ -1,11 +1,8 @@
-import { GetCommand, PutCommand, DeleteCommand, ScanCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
-import { ddb } from "../lib/aws.js";
-import { env } from "../env.js";
+import { query, queryOne, execute } from "../lib/db.js";
 import { logger } from "../logger.js";
 import type { RecordingPattern } from "../types.js";
 
-const TABLE = env.DDB_PATTERNS_TABLE;
-const CACHE_TTL_MS = 60_000; // workers parse on the hot path — don't hit DDB per message
+const CACHE_TTL_MS = 60_000; // workers parse on the hot path — don't hit the DB per message
 
 export function newPatternId(): string {
   const rand = Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
@@ -13,23 +10,31 @@ export function newPatternId(): string {
 }
 
 export async function listPatterns(): Promise<RecordingPattern[]> {
-  const res = await ddb.send(new ScanCommand({ TableName: TABLE }));
-  return ((res.Items as RecordingPattern[]) ?? []).sort((a, b) => a.priority - b.priority);
+  return query<RecordingPattern>("SELECT * FROM cx_recording_patterns ORDER BY priority");
 }
 
 export async function getPattern(id: string): Promise<RecordingPattern | null> {
-  const res = await ddb.send(new GetCommand({ TableName: TABLE, Key: { pattern_id: id } }));
-  return (res.Item as RecordingPattern) ?? null;
+  return queryOne<RecordingPattern>("SELECT * FROM cx_recording_patterns WHERE pattern_id = $1", [id]);
 }
 
 export async function putPattern(p: RecordingPattern): Promise<RecordingPattern> {
-  await ddb.send(new PutCommand({ TableName: TABLE, Item: p }));
+  await execute(
+    `INSERT INTO cx_recording_patterns
+       (pattern_id, label, regex, flags, priority, active, match_count, is_builtin, created_by, created_at, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+     ON CONFLICT (pattern_id) DO UPDATE SET
+       label = EXCLUDED.label, regex = EXCLUDED.regex, flags = EXCLUDED.flags,
+       priority = EXCLUDED.priority, active = EXCLUDED.active, match_count = EXCLUDED.match_count,
+       is_builtin = EXCLUDED.is_builtin, created_by = EXCLUDED.created_by,
+       created_at = EXCLUDED.created_at, updated_at = EXCLUDED.updated_at`,
+    [p.pattern_id, p.label, p.regex, p.flags, p.priority, p.active, p.match_count, p.is_builtin, p.created_by, p.created_at, p.updated_at]
+  );
   invalidatePatternCache();
   return p;
 }
 
 export async function deletePattern(id: string): Promise<void> {
-  await ddb.send(new DeleteCommand({ TableName: TABLE, Key: { pattern_id: id } }));
+  await execute("DELETE FROM cx_recording_patterns WHERE pattern_id = $1", [id]);
   invalidatePatternCache();
 }
 
@@ -37,50 +42,34 @@ export async function updatePatternFields(
   id: string,
   patch: Partial<Pick<RecordingPattern, "label" | "regex" | "flags" | "priority" | "active">>
 ): Promise<RecordingPattern | null> {
-  const sets: string[] = ["updated_at = :u"];
-  const values: Record<string, unknown> = { ":u": new Date().toISOString() };
-  const names: Record<string, string> = {};
+  const sets: string[] = ["updated_at = $1"];
+  const values: unknown[] = [new Date().toISOString()];
   for (const [k, v] of Object.entries(patch)) {
     if (v === undefined) continue;
-    sets.push(`#${k} = :${k}`);
-    names[`#${k}`] = k;
-    values[`:${k}`] = v;
+    values.push(v);
+    sets.push(`${k} = $${values.length}`);
   }
-  const res = await ddb.send(
-    new UpdateCommand({
-      TableName: TABLE,
-      Key: { pattern_id: id },
-      UpdateExpression: `SET ${sets.join(", ")}`,
-      ExpressionAttributeNames: names,
-      ExpressionAttributeValues: values,
-      ConditionExpression: "attribute_exists(pattern_id)",
-      ReturnValues: "ALL_NEW",
-    })
+  values.push(id);
+  const updated = await queryOne<RecordingPattern>(
+    `UPDATE cx_recording_patterns SET ${sets.join(", ")} WHERE pattern_id = $${values.length} RETURNING *`,
+    values
   );
   invalidatePatternCache();
-  return (res.Attributes as RecordingPattern) ?? null;
+  return updated;
 }
 
 /** Atomically bump a pattern's usage counter (fire-and-forget on the hot path). */
 export async function incrementMatchCount(id: string): Promise<void> {
-  await ddb.send(
-    new UpdateCommand({
-      TableName: TABLE,
-      Key: { pattern_id: id },
-      UpdateExpression: "ADD match_count :one SET updated_at = :u",
-      ExpressionAttributeValues: { ":one": 1, ":u": new Date().toISOString() },
-    })
+  await execute(
+    "UPDATE cx_recording_patterns SET match_count = match_count + 1, updated_at = $1 WHERE pattern_id = $2",
+    [new Date().toISOString(), id]
   );
 }
 
 async function setPriority(id: string, priority: number): Promise<void> {
-  await ddb.send(
-    new UpdateCommand({
-      TableName: TABLE,
-      Key: { pattern_id: id },
-      UpdateExpression: "SET priority = :p, updated_at = :u",
-      ExpressionAttributeValues: { ":p": priority, ":u": new Date().toISOString() },
-    })
+  await execute(
+    "UPDATE cx_recording_patterns SET priority = $1, updated_at = $2 WHERE pattern_id = $3",
+    [priority, new Date().toISOString(), id]
   );
 }
 
@@ -101,10 +90,9 @@ export function invalidatePatternCache(): void {
 export async function getActivePatternsCached(): Promise<RecordingPattern[]> {
   if (cache && Date.now() - cache.at < CACHE_TTL_MS) return cache.patterns;
 
-  const all = (await ddb.send(new ScanCommand({ TableName: TABLE })).then((r) => (r.Items as RecordingPattern[]) ?? []))
-    .filter((p) => p.active);
-  all.sort((a, b) => a.priority - b.priority);
-
+  const all = await query<RecordingPattern>(
+    "SELECT * FROM cx_recording_patterns WHERE active = true ORDER BY priority"
+  );
   await maybePromote(all);
   cache = { at: Date.now(), patterns: all };
   return all;
@@ -121,7 +109,6 @@ async function maybePromote(patterns: RecordingPattern[]): Promise<void> {
     try {
       const topPriority = top.priority;
       await Promise.all([setPriority(top.pattern_id, current.priority), setPriority(current.pattern_id, topPriority)]);
-      // Reflect the swap in the in-memory copy so this window uses the new order.
       top.priority = current.priority;
       current.priority = topPriority;
       patterns.sort((a, b) => a.priority - b.priority);

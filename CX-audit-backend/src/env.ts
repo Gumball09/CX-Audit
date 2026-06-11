@@ -28,10 +28,18 @@ export const env = {
   JWT_SECRET: getEnv("JWT_SECRET", false, "dev-insecure-secret-change-me"),
   JWT_EXPIRES_IN: getEnv("JWT_EXPIRES_IN", false, "12h"),
 
+  // ---- Database (Supabase / Postgres) ----
+  // Postgres connection string (Supabase: Project Settings → Database → URI).
+  DATABASE_URL: getEnv("DATABASE_URL", false),
+  // Set to "false" only for a local non-TLS Postgres; Supabase requires TLS.
+  DATABASE_SSL: getEnv("DATABASE_SSL", false, "true") !== "false",
+
   // ---- AWS ----
   AWS_REGION: getEnv("AWS_REGION", false, "us-east-1"),
   AWS_ACCESS_KEY_ID: getEnv("AWS_ACCESS_KEY_ID", false),
   AWS_SECRET_ACCESS_KEY: getEnv("AWS_SECRET_ACCESS_KEY", false),
+  // Required when using temporary/SSO credentials (the SSO portal gives all three).
+  AWS_SESSION_TOKEN: getEnv("AWS_SESSION_TOKEN", false),
 
   // ---- S3 ----
   // Source bucket holding the raw call recordings (read-only for this app).
@@ -44,6 +52,9 @@ export const env = {
   S3_AUDIT_PREFIX: getEnv("S3_AUDIT_PREFIX", false, "audits/"),
 
   // ---- SQS ----
+  // Local testing without SQS: when "true", the API runs the transcribe→audit
+  // stages inline (no queue, no workers). Leave false in prod (use SQS).
+  INLINE_PIPELINE: getEnv("INLINE_PIPELINE", false, "") === "true",
   SQS_TRANSCRIPTION_QUEUE_URL: getEnv("SQS_TRANSCRIPTION_QUEUE_URL", false),
   SQS_AUDIT_QUEUE_URL: getEnv("SQS_AUDIT_QUEUE_URL", false),
   // How many messages a worker pulls per long-poll cycle (1-10).
@@ -92,6 +103,11 @@ export function validateEnv(context: "api" | "worker" = "api") {
   const isProd = env.NODE_ENV === "production";
   const fatal: string[] = [];
   const warnings: string[] = [];
+
+  // Database is required everywhere (it backs every API + worker operation).
+  if (!env.DATABASE_URL) {
+    (isProd ? fatal : warnings).push("DATABASE_URL is not set — the app cannot reach the database (Supabase/Postgres).");
+  }
 
   // AWS / S3 are required everywhere.
   if (!env.AWS_ACCESS_KEY_ID || !env.AWS_SECRET_ACCESS_KEY) {
