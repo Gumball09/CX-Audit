@@ -1,0 +1,21 @@
+version: 1
+applications:
+  - appRoot: CX-audit-dashboard
+    frontend:
+      phases:
+        preBuild:
+          commands:
+            - npm ci
+        build:
+          # Override Nitro's default Cloudflare target so the build emits the
+          # AWS Amplify-compatible output (.amplify-hosting with deploy-manifest.json).
+          commands:
+            - NITRO_PRESET=aws-amplify npm run build
+      artifacts:
+        # Nitro's aws-amplify preset writes the deployable bundle here.
+        baseDirectory: .amplify-hosting
+        files:
+          - '**/*'
+      cache:
+        paths:
+          - node_modules/**/*
