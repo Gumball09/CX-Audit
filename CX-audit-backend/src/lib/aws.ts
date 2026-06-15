@@ -18,7 +18,12 @@ const credentials =
 // transient network errors.
 const common = { region: env.AWS_REGION, credentials, maxAttempts: 4 };
 
-export const s3 = new S3Client(common);
+// `followRegionRedirects` lets this single client read a bucket that lives in a
+// different region than AWS_REGION (the recordings bucket is in us-east-1 while
+// the app runs in us-west-2). Without it, GetObject returns a 301
+// PermanentRedirect; with it, the SDK transparently retries against the bucket's
+// real region. Harmless for same-region buckets (the output bucket).
+export const s3 = new S3Client({ ...common, followRegionRedirects: true });
 export const sqs = new SQSClient(common);
 
 const ddbBase = new DynamoDBClient(common);
