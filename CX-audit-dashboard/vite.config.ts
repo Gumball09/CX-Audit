@@ -7,9 +7,13 @@
 import { defineConfig } from "@lovable.dev/vite-tanstack-config";
 
 export default defineConfig({
+  // Ship a static SPA (the dashboard is fully client-rendered against the CX API).
+  // nitro:false skips the deploy-bundle plugin; spa.enabled prerenders a static
+  // shell to dist/client/_shell.html, which we host on Amplify static hosting.
+  nitro: false,
   tanstackStart: {
+    spa: { enabled: true },
     // Redirect TanStack Start's bundled server entry to src/server.ts (our SSR error wrapper).
-    // nitro/vite builds from this
     server: { entry: "server" },
   },
 });

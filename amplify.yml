@@ -7,13 +7,15 @@ applications:
           commands:
             - npm ci
         build:
-          # Override Nitro's default Cloudflare target so the build emits the
-          # AWS Amplify-compatible output (.amplify-hosting with deploy-manifest.json).
+          # Static SPA build. TanStack Start (spa.enabled) prerenders the client
+          # shell to dist/client/_shell.html; copy it to index.html so Amplify
+          # static hosting serves it as the root + SPA fallback document.
+          # VITE_API_BASE is injected from the Amplify console env vars at build time.
           commands:
-            - NITRO_PRESET=aws-amplify npm run build
+            - npm run build
+            - cp dist/client/_shell.html dist/client/index.html
       artifacts:
-        # Nitro's aws-amplify preset writes the deployable bundle here.
-        baseDirectory: .amplify-hosting
+        baseDirectory: dist/client
         files:
           - '**/*'
       cache:
