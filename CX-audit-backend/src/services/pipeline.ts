@@ -9,6 +9,7 @@ import {
   s3Url,
 } from "../lib/s3.js";
 import { sendMessage } from "../lib/sqs.js";
+import { probeBufferDurationSec } from "../lib/audio.js";
 import { transcribeAudio, auditTranscript } from "./openai.js";
 import { getUserByAgentId } from "../db/users.js";
 import { getTeam } from "../db/teams.js";
@@ -66,7 +67,9 @@ export async function processTranscription(recordingKey: string, queueTeamId: st
   const created = await createAuditIfAbsent(record);
   if (!created) {
     const existing = await getAudit(auditId);
-    if (existing && existing.status !== "failed" && existing.status !== "queued") {
+    // `skipped` stays re-processable so lowering MIN_CALL_DURATION_SECONDS and
+    // reprocessing can re-evaluate a previously-too-short call.
+    if (existing && existing.status !== "failed" && existing.status !== "queued" && existing.status !== "skipped") {
       logger.info(`Skipping ${auditId} — already processed (status=${existing.status})`);
       return;
     }
@@ -75,12 +78,26 @@ export async function processTranscription(recordingKey: string, queueTeamId: st
 
   await setStatus(auditId, "transcribing");
   const buffer = await getRecordingBuffer(recordingKey, infra.recording_bucket);
+
+  // Gate on call length: recordings shorter than the configured minimum are too
+  // short to score, so mark them `skipped` and stop before incurring any
+  // transcription/audit cost. Fail open — a 0 (unprobeable) duration is NOT
+  // skipped. `duration_sec` is also stored for display on longer calls.
+  const durationSec = await probeBufferDurationSec(buffer, meta.file_name);
+  const minDuration = env.MIN_CALL_DURATION_SECONDS;
+  if (minDuration > 0 && durationSec > 0 && durationSec < minDuration) {
+    await updateAudit(auditId, { status: "skipped", duration_sec: Math.round(durationSec) });
+    logger.info(`Skipping ${auditId} — call too short (${durationSec.toFixed(1)}s < ${minDuration}s)`);
+    return;
+  }
+
   const { transcription_model } = await getModelSettingsCached();
   const transcript = await transcribeAudio(buffer, meta.file_name, transcription_model);
   const transcriptionKey = await saveTranscription(transcript, auditId, infra.output_bucket);
 
   await updateAudit(auditId, {
     status: "transcribed",
+    duration_sec: durationSec > 0 ? Math.round(durationSec) : undefined,
     transcription_key: transcriptionKey,
     transcription_url: s3Url(infra.output_bucket, transcriptionKey),
     transcribed_at: new Date().toISOString(),

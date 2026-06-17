@@ -152,6 +152,7 @@ export type AuditStatus =
   | "transcribed"
   | "auditing"
   | "audited"
+  | "skipped"
   | "failed";
 
 export interface Audit {
@@ -164,6 +165,7 @@ export interface Audit {
   customer_number: string;
   call_datetime: string;
   team: Team | null;
+  duration_sec?: number;
   status: AuditStatus;
   error?: string;
   transcription_key?: string;
@@ -301,6 +303,7 @@ export function rubricScale(src?: { scale_max?: number; criteria: Criterion[] })
 export function statusClass(s: AuditStatus) {
   if (s === "audited") return "bg-emerald-500/15 text-emerald-400 border-emerald-500/30";
   if (s === "failed") return "bg-[color:var(--escalations)]/15 text-[color:var(--escalations)] border-[color:var(--escalations)]/30";
+  if (s === "skipped") return "bg-muted text-muted-foreground border-border";
   return "bg-[color:var(--teal)]/15 text-[color:var(--teal)] border-[color:var(--teal)]/30";
 }
 

@@ -94,6 +94,11 @@ export const env = {
   // of an earlier one (collapses paraphrased "restart" loops). 1 = exact-only.
   TRANSCRIPTION_NEARDUP_SIMILARITY: Number(getEnv("TRANSCRIPTION_NEARDUP_SIMILARITY", false, "0.8")),
 
+  // Recordings shorter than this (seconds) are marked `skipped` and never
+  // transcribed/audited — they're too short to score meaningfully. 0 disables
+  // the gate. If the duration can't be probed, the call is audited normally.
+  MIN_CALL_DURATION_SECONDS: Number(getEnv("MIN_CALL_DURATION_SECONDS", false, "45")),
+
   // ---- Sentry (error/alert reporting) ----
   // Leave SENTRY_DSN blank to disable reporting entirely (local/stub mode).
   SENTRY_DSN: getEnv("SENTRY_DSN", false),
