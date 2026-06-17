@@ -5,9 +5,14 @@ import {
   type User,
   type Team,
   type TeamRubric,
+  type Rubric,
+  type RubricResult,
   type FeedbackDisposition,
   canSeeAdmin,
   scoreColor,
+  fmtNum,
+  criterionPoints,
+  rubricScale,
   statusClass,
   teamClass,
 } from "@/lib/cx-data";
@@ -16,6 +21,7 @@ import {
   fetchTranscript,
   reauditCall,
   fetchTeams,
+  fetchRubrics,
   fetchAuditFeedback,
   createFeedback,
   deleteFeedback,
@@ -52,6 +58,11 @@ export function CallAuditsView({ user, users }: { user: User; users: User[] }) {
 
   // Team filter options come from the live team list (includes new teams).
   const { data: teamList = [] } = useQuery<TeamRubric[]>({ queryKey: ["teams"], queryFn: fetchTeams, enabled: canSeeAdmin(user.role) });
+
+  // The primary rubric per team supplies scale_max + criterion weights so the
+  // audit view can show scores as points (earned / weight) instead of raw scale.
+  const rubricByTeam = useMemo(() => Object.fromEntries(teamList.map((t) => [t.team_id, t])), [teamList]);
+  const teamScaleMax = (t?: Team | null) => rubricByTeam[t ?? ""]?.scale_max ?? 100;
 
   const userByAgent = useMemo(
     () => Object.fromEntries(users.filter((u) => u.agent_id).map((u) => [u.agent_id!, u])),
@@ -156,7 +167,7 @@ export function CallAuditsView({ user, users }: { user: User; users: User[] }) {
                   <span className="line-clamp-1 max-w-[280px] inline-block align-middle">{a.flag_reason ?? "—"}</span>
                 </td>
                 <td className="px-3 py-3">
-                  <span className={cn("font-mono text-xs px-2 py-0.5 border rounded-sm inline-block min-w-[36px] text-center", scoreColor(a.score))}>{a.score ?? "—"}</span>
+                  <span className={cn("font-mono text-xs px-2 py-0.5 border rounded-sm inline-block min-w-[36px] text-center", scoreColor(a.score, teamScaleMax(a.team)))}>{a.score ?? "—"}</span>
                 </td>
               </tr>
             ))}
@@ -167,12 +178,12 @@ export function CallAuditsView({ user, users }: { user: User; users: User[] }) {
         </table>
       </div>
 
-      <AuditDrawer audit={selected} agentName={selected ? agentName(selected.agent_id) : ""} viewer={user} onClose={() => setSelected(null)} />
+      <AuditDrawer audit={selected} rubric={selected ? rubricByTeam[selected.team ?? ""] : undefined} agentName={selected ? agentName(selected.agent_id) : ""} viewer={user} onClose={() => setSelected(null)} />
     </div>
   );
 }
 
-function AuditDrawer({ audit, agentName, viewer, onClose }: { audit: Audit | null; agentName: string; viewer: User; onClose: () => void }) {
+function AuditDrawer({ audit, rubric, agentName, viewer, onClose }: { audit: Audit | null; rubric?: TeamRubric; agentName: string; viewer: User; onClose: () => void }) {
   const [transcriptOpen, setTranscriptOpen] = useState(false);
   const queryClient = useQueryClient();
   const canReaudit = canSeeAdmin(viewer.role);
@@ -182,6 +193,21 @@ function AuditDrawer({ audit, agentName, viewer, onClose }: { audit: Audit | nul
     queryFn: () => fetchTranscript(audit!.audit_id),
     enabled: !!audit && transcriptOpen && !!audit.transcription_key,
   });
+
+  // Additional (non-primary) rubrics carry their own scale_max + weights; fetch
+  // them only when the audit was scored against something beyond the primary.
+  const hasExtraRubric = !!audit?.rubric_results?.some((r) => r.rubric_id !== "primary");
+  const { data: extraRubrics = [] } = useQuery<Rubric[]>({
+    queryKey: ["rubrics", audit?.team],
+    queryFn: () => fetchRubrics(audit!.team!),
+    enabled: !!audit?.team && hasExtraRubric,
+  });
+
+  // Scale facts (scaleMax, per-criterion weights, summed point total) for a
+  // given rubric result: primary -> the team rubric, else the matching extra.
+  const scaleFor = (r: RubricResult) =>
+    rubricScale(r.rubric_id === "primary" ? rubric : extraRubrics.find((x) => x.rubric_id === r.rubric_id));
+  const primaryScale = rubricScale(rubric);
 
   const reaudit = useMutation({
     mutationFn: () => reauditCall(audit!.audit_id),
@@ -205,7 +231,16 @@ function AuditDrawer({ audit, agentName, viewer, onClose }: { audit: Audit | nul
               <Meta label="Status" value={audit.status} />
               <Meta label="Campaign" value={audit.campaign} />
               <Meta label="Customer" value={audit.customer_number} />
-              <Meta label="Score" value={audit.score !== undefined ? String(audit.score) : "—"} />
+              <Meta
+                label="Score"
+                value={
+                  audit.score === undefined
+                    ? "—"
+                    : primaryScale.totalWeight > 0
+                      ? `${fmtNum((audit.score / primaryScale.scaleMax) * primaryScale.totalWeight)} / ${fmtNum(primaryScale.totalWeight)}`
+                      : String(audit.score)
+                }
+              />
               {audit.recording_url && (
                 <a href={audit.recording_url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 font-mono text-[11px] text-primary hover:underline">
                   <ExternalLink className="h-3 w-3" /> recording
@@ -230,42 +265,53 @@ function AuditDrawer({ audit, agentName, viewer, onClose }: { audit: Audit | nul
             {audit.rubric_results && audit.rubric_results.length > 0 ? (
               <section className="px-6 py-4 border-b border-border space-y-5">
                 <h3 className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">Audit Breakdown · {audit.rubric_results.length} rubric(s)</h3>
-                {audit.rubric_results.map((r) => (
+                {audit.rubric_results.map((r) => {
+                  const { scaleMax, weightByName, totalWeight } = scaleFor(r);
+                  return (
                   <div key={r.rubric_id} className="space-y-3">
                     <div className="flex items-center gap-2">
                       <span className="text-sm font-semibold">{r.rubric_name}</span>
                       {r.rubric_id === "primary" && <span className="font-mono text-[9px] uppercase px-1.5 py-0.5 border border-border text-muted-foreground rounded-sm">primary</span>}
                       {r.flagged && <span className="font-mono text-[9px] uppercase px-1.5 py-0.5 border border-[color:var(--escalations)]/40 text-[color:var(--escalations)] rounded-sm">flagged</span>}
-                      <span className={cn("ml-auto font-mono text-xs px-2 py-0.5 border rounded-sm", scoreColor(r.score))}>{r.score}</span>
+                      <span className={cn("ml-auto font-mono text-xs px-2 py-0.5 border rounded-sm", scoreColor(r.score, scaleMax))}>
+                        {totalWeight > 0 ? `${fmtNum((r.score / scaleMax) * totalWeight)} / ${fmtNum(totalWeight)}` : r.score}
+                      </span>
                     </div>
                     {r.flagged && r.flag_reason && <p className="text-xs text-[color:var(--escalations)] leading-relaxed">{r.flag_reason}</p>}
                     <ul className="space-y-2">
-                      {r.criteria_scores.map((c) => (
+                      {r.criteria_scores.map((c) => {
+                        const pts = criterionPoints(c.score, scaleMax, weightByName.get(c.name));
+                        return (
                         <li key={c.name} className="border border-border rounded-md p-3 bg-background">
                           <div className="flex items-center justify-between mb-1">
                             <span className="text-sm font-medium">{c.name}</span>
-                            <span className={cn("font-mono text-xs px-2 py-0.5 border rounded-sm", scoreColor(c.score))}>{c.score}</span>
+                            <span className={cn("font-mono text-xs px-2 py-0.5 border rounded-sm", scoreColor(c.score, scaleMax))}>{fmtNum(pts.earned)} / {fmtNum(pts.max)}</span>
                           </div>
                           <p className="text-xs text-muted-foreground leading-relaxed">{c.explanation}</p>
                         </li>
-                      ))}
+                        );
+                      })}
                     </ul>
                   </div>
-                ))}
+                  );
+                })}
               </section>
             ) : audit.criteria_scores && audit.criteria_scores.length > 0 ? (
               <section className="px-6 py-4 border-b border-border">
                 <h3 className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground mb-3">Audit Breakdown</h3>
                 <ul className="space-y-3">
-                  {audit.criteria_scores.map((c) => (
+                  {audit.criteria_scores.map((c) => {
+                    const pts = criterionPoints(c.score, primaryScale.scaleMax, primaryScale.weightByName.get(c.name));
+                    return (
                     <li key={c.name} className="border border-border rounded-md p-3 bg-background">
                       <div className="flex items-center justify-between mb-1">
                         <span className="text-sm font-medium">{c.name}</span>
-                        <span className={cn("font-mono text-xs px-2 py-0.5 border rounded-sm", scoreColor(c.score))}>{c.score}</span>
+                        <span className={cn("font-mono text-xs px-2 py-0.5 border rounded-sm", scoreColor(c.score, primaryScale.scaleMax))}>{fmtNum(pts.earned)} / {fmtNum(pts.max)}</span>
                       </div>
                       <p className="text-xs text-muted-foreground leading-relaxed">{c.explanation}</p>
                     </li>
-                  ))}
+                    );
+                  })}
                 </ul>
               </section>
             ) : null}

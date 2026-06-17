@@ -257,11 +257,45 @@ export function roleClass(r: Role) {
   }[r];
 }
 
-export function scoreColor(score?: number) {
-  if (score === undefined) return "bg-muted text-muted-foreground border-border";
-  if (score >= 75) return "bg-emerald-500/15 text-emerald-400 border-emerald-500/30";
-  if (score >= 55) return "bg-[color:var(--oorp)]/15 text-[color:var(--oorp)] border-[color:var(--oorp)]/30";
+// Color band for a score shown against its scale. `max` is the top of the
+// scale the score lives on (a rubric's scale_max, or a criterion's weight).
+// Bands are by ratio so the same thresholds read correctly on a 0-1, 0-12, or
+// 0-100 scale. `max` defaults to 100 to preserve callers that pass a percentage.
+export function scoreColor(score?: number, max = 100) {
+  if (score === undefined || !(max > 0)) return "bg-muted text-muted-foreground border-border";
+  const ratio = score / max;
+  if (ratio >= 0.75) return "bg-emerald-500/15 text-emerald-400 border-emerald-500/30";
+  if (ratio >= 0.55) return "bg-[color:var(--oorp)]/15 text-[color:var(--oorp)] border-[color:var(--oorp)]/30";
   return "bg-[color:var(--escalations)]/15 text-[color:var(--escalations)] border-[color:var(--escalations)]/30";
+}
+
+// Format a points value for display: integers stay integral, fractions show
+// one decimal (so a binary 0/1 reads cleanly while weighted scores stay legible).
+export function fmtNum(n: number): string {
+  return Number.isInteger(n) ? String(n) : (Math.round(n * 10) / 10).toFixed(1);
+}
+
+// The auditor scores each criterion on 0..scaleMax. A criterion's contribution
+// to the rubric total is its share of that scale times its weight, so we show
+// it as `earned / weight` (e.g. a passed binary criterion reads 1 / 1). Weight
+// and scaleMax fall back to sane defaults when a rubric omits them.
+export function criterionPoints(score: number, scaleMax?: number, weight?: number) {
+  const sm = scaleMax && scaleMax > 0 ? scaleMax : 100;
+  const max = weight && weight > 0 ? weight : 1;
+  return { earned: (score / sm) * max, max };
+}
+
+// Resolve a rubric-like source into the scale facts the audit view needs:
+// the per-criterion scale max, each criterion's weight (by name), and the
+// summed weight that forms the rubric's point total. Missing weights count as
+// 1 (equal weighting), mirroring the server's normalization fallback.
+export function rubricScale(src?: { scale_max?: number; criteria: Criterion[] }) {
+  const scaleMax = src?.scale_max && src.scale_max > 0 ? src.scale_max : 100;
+  const criteria = src?.criteria ?? [];
+  const weightOf = (c: Criterion) => (c.weight && c.weight > 0 ? c.weight : 1);
+  const weightByName = new Map(criteria.map((c) => [c.name, weightOf(c)]));
+  const totalWeight = criteria.reduce((s, c) => s + weightOf(c), 0);
+  return { scaleMax, weightByName, totalWeight };
 }
 
 export function statusClass(s: AuditStatus) {
