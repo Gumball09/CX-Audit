@@ -61,7 +61,10 @@ export async function createAuditIfAbsent(record: AuditRecord): Promise<boolean>
 
 export async function updateAudit(
   auditId: string,
-  patch: Partial<AuditRecord>
+  // `undefined` leaves an attribute untouched; explicit `null` REMOVEs it
+  // (needed for GSI keys like team/agent_id that can't hold NULL, and to clear
+  // a stale `error` once an audit is no longer failed).
+  patch: { [K in keyof AuditRecord]?: AuditRecord[K] | null }
 ): Promise<AuditRecord | null> {
   const sets: string[] = ["updated_at = :u"];
   const removes: string[] = [];
@@ -71,8 +74,9 @@ export async function updateAudit(
   for (const [k, v] of Object.entries(patch)) {
     if (v === undefined || k === "audit_id") continue;
     names[`#${k}`] = k;
-    // team / agent_id are GSI keys: clearing one must REMOVE it (no NULL key).
-    if ((k === "team" || k === "agent_id") && v == null) {
+    // Explicit null clears the attribute (REMOVE). team/agent_id are GSI keys
+    // that cannot hold a NULL, so clearing them must drop the attribute too.
+    if (v === null) {
       removes.push(`#${k}`);
       continue;
     }
@@ -95,7 +99,10 @@ export async function updateAudit(
 }
 
 export async function setStatus(auditId: string, status: AuditStatus, error?: string) {
-  return updateAudit(auditId, { status, error });
+  // An error message only belongs to a failed audit. Any other transition
+  // (re-queue, transcribe, audit, success) clears a stale one — so a re-audit
+  // after, e.g., fixing a team mapping doesn't keep showing the old failure.
+  return updateAudit(auditId, { status, error: status === "failed" ? (error ?? null) : null });
 }
 
 // ---- scoped, paginated listing -------------------------------------------
