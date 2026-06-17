@@ -58,6 +58,25 @@ function run(cmd: string, args: string[]): Promise<{ stdout: string; stderr: str
   });
 }
 
+/**
+ * Probe the duration (seconds) of an in-memory recording. ffprobe needs a file
+ * path, so we write the buffer to a temp file, probe, and clean up. Returns 0 if
+ * the duration can't be determined (caller should fail open, not skip).
+ */
+export async function probeBufferDurationSec(buffer: Buffer, fileName: string): Promise<number> {
+  const dir = await mkdtemp(path.join(tmpdir(), "cx-dur-"));
+  const file = path.join(dir, path.basename(fileName) || "audio");
+  try {
+    await writeFile(file, buffer);
+    return await probeDurationSec(file);
+  } catch (err) {
+    logger.warn(`Could not probe duration for "${fileName}": ${(err as Error).message}`);
+    return 0;
+  } finally {
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 /** Total duration of the audio file in seconds (0 if unknown). */
 async function probeDurationSec(file: string): Promise<number> {
   const { stdout } = await run(FFPROBE, [

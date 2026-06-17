@@ -272,6 +272,14 @@ function AuditDrawer({ audit, rubric, agentName, viewer, onClose }: { audit: Aud
               )}
             </section>
 
+            {audit.status === "skipped" && (
+              <section className="px-6 py-4 border-b border-border">
+                <div className="border-l-2 border-border bg-background p-3 rounded-r-sm text-sm text-muted-foreground">
+                  Call skipped — too short to audit{audit.duration_sec ? ` (${audit.duration_sec}s)` : ""}.
+                </div>
+              </section>
+            )}
+
             {audit.error && (
               <section className="px-6 py-4 border-b border-border">
                 <div className="border-l-2 border-destructive bg-background p-3 rounded-r-sm text-sm text-destructive">{audit.error}</div>

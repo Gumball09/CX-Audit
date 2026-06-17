@@ -141,6 +141,7 @@ export type AuditStatus =
   | "transcribed"
   | "auditing"
   | "audited"
+  | "skipped"   // too short to audit (< MIN_CALL_DURATION_SECONDS) — never scored
   | "failed";
 
 export interface CriterionScore {
@@ -197,6 +198,7 @@ export interface AuditRecord {
   customer_number: string;
   call_datetime: string;     // ISO 8601 (also the GSI sort key)
   team: Team | null;         // resolved from the agent record
+  duration_sec?: number;     // recording length in seconds (probed at transcription)
 
   status: AuditStatus;
   error?: string;
