@@ -55,6 +55,15 @@ export function AuditPromptsView({ user }: { user: User }) {
     return Math.round(((Number(w) || 0) / weightTotal) * 100);
   };
 
+  // A critical override is "flag if the criterion scores below this"; since a
+  // criterion can earn at most its weight, a threshold at or above the weight
+  // would flag even a perfect pass. So it must stay strictly below the weight.
+  const criterionError = (c: Criterion): string | null =>
+    c.critical_threshold !== undefined && c.weight !== undefined && c.weight > 0 && c.critical_threshold >= c.weight
+      ? `must be < weight (${c.weight})`
+      : null;
+  const hasCriterionErrors = !!draft?.criteria.some((c) => criterionError(c));
+
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ["teams"] });
 
   const saveMut = useMutation({
@@ -183,7 +192,9 @@ export function AuditPromptsView({ user }: { user: User }) {
                 <span className="font-mono text-[10px] text-muted-foreground">weights are relative · normalized automatically</span>
               </div>
               <div className="space-y-2">
-                {draft.criteria.map((c, i) => (
+                {draft.criteria.map((c, i) => {
+                  const critErr = criterionError(c);
+                  return (
                   <div key={i} className="border border-border bg-surface rounded-md p-3">
                     <div className="flex gap-2 items-start">
                       <Input value={c.name} disabled={!editable} onChange={(e) => updateCriterion(i, { name: e.target.value })} placeholder="Criterion name" className="bg-background border-border flex-1" />
@@ -199,11 +210,14 @@ export function AuditPromptsView({ user }: { user: User }) {
                     <Textarea value={c.guidance ?? ""} disabled={!editable} onChange={(e) => updateCriterion(i, { guidance: e.target.value || undefined })} placeholder="Optional extra guidance / examples for the auditor…" className="mt-2 bg-background border-border text-xs" rows={2} />
                     <div className="mt-2 flex items-center gap-2">
                       <label className="font-mono text-[10px] text-muted-foreground">Critical override (&lt;)</label>
-                      <Input type="number" value={c.critical_threshold ?? ""} disabled={!editable} onChange={(e) => updateCriterion(i, { critical_threshold: e.target.value === "" ? undefined : Number(e.target.value) })} placeholder="—" className="bg-background border-border w-20 font-mono" />
-                      <span className="font-mono text-[10px] text-muted-foreground/70">blank = use rubric default ({draft.critical_criterion_threshold})</span>
+                      <Input type="number" value={c.critical_threshold ?? ""} disabled={!editable} onChange={(e) => updateCriterion(i, { critical_threshold: e.target.value === "" ? undefined : Number(e.target.value) })} placeholder="—" className={cn("bg-background border-border w-20 font-mono", critErr && "border-destructive focus-visible:ring-destructive")} />
+                      <span className={cn("font-mono text-[10px]", critErr ? "text-destructive" : "text-muted-foreground/70")}>
+                        {critErr ? `${critErr} · ` : "must be < weight · "}blank = use rubric default ({draft.critical_criterion_threshold})
+                      </span>
                     </div>
                   </div>
-                ))}
+                  );
+                })}
               </div>
               {editable && (
                 <Button onClick={addCriterion} variant="ghost" className="mt-2 border border-border font-mono text-xs">
@@ -261,10 +275,11 @@ export function AuditPromptsView({ user }: { user: User }) {
 
             {editable && (
               <div className="flex gap-2 sticky bottom-0 bg-background py-3 border-t border-border">
-                <Button onClick={() => saveMut.mutate(draft)} disabled={saveMut.isPending} className="bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-40">
+                <Button onClick={() => saveMut.mutate(draft)} disabled={saveMut.isPending || hasCriterionErrors} className="bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-40">
                   {saveMut.isPending ? "Saving…" : "Save Changes"}
                 </Button>
                 <Button variant="ghost" onClick={() => selected && setDraft(selected)} className="border border-border">Discard</Button>
+                {hasCriterionErrors && <span className="self-center font-mono text-[10px] text-destructive">Fix critical overrides (must be &lt; weight) to save.</span>}
               </div>
             )}
           </div>
