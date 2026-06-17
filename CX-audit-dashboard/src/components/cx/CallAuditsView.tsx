@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   type Audit,
@@ -44,11 +44,15 @@ export function CallAuditsView({ user, users }: { user: User; users: User[] }) {
   const [flaggedOnly, setFlaggedOnly] = useState(false);
   const [selected, setSelected] = useState<Audit | null>(null);
 
+  const PAGE_SIZE = 50;
+  const [page, setPage] = useState(1);
+
   const filters: AuditFilters = {
     team,
     flagged: flaggedOnly,
     from: from ? `${from}T00:00:00.000Z` : undefined,
     to: to ? `${to}T23:59:59.999Z` : undefined,
+    limit: 1000, // pull a generous set; pagination below keeps the view to 50/page
   };
 
   const { data: audits = [], isLoading } = useQuery<Audit[]>({
@@ -75,6 +79,13 @@ export function CallAuditsView({ user, users }: { user: User; users: User[] }) {
     const q = agentQ.toLowerCase();
     return a.agent_id.includes(q) || agentName(a.agent_id).toLowerCase().includes(q);
   });
+
+  // Client-side pagination: 50 rows/page over the filtered set. Reset to page 1
+  // whenever the filters or search change so we never land on an empty page.
+  useEffect(() => { setPage(1); }, [team, flaggedOnly, from, to, agentQ]);
+  const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const current = Math.min(page, pageCount);
+  const pageItems = filtered.slice((current - 1) * PAGE_SIZE, current * PAGE_SIZE);
 
   const exportCsv = () => {
     const rows = [
@@ -148,9 +159,9 @@ export function CallAuditsView({ user, users }: { user: User; users: User[] }) {
             {isLoading && (
               <tr><td colSpan={8} className="px-3 py-12 text-center font-mono text-xs text-muted-foreground">Loading audits…</td></tr>
             )}
-            {!isLoading && filtered.map((a, i) => (
+            {!isLoading && pageItems.map((a, i) => (
               <tr key={a.audit_id} onClick={() => setSelected(a)} className="border-b border-border last:border-0 cursor-pointer hover:bg-surface-2 transition-colors duration-100">
-                <td className="px-3 py-3 font-mono text-xs text-muted-foreground">{i + 1}</td>
+                <td className="px-3 py-3 font-mono text-xs text-muted-foreground">{(current - 1) * PAGE_SIZE + i + 1}</td>
                 <td className="px-3 py-3">
                   <div className="text-foreground">{agentName(a.agent_id)}</div>
                   <div className="font-mono text-[10px] text-muted-foreground">{a.agent_id}</div>
@@ -177,6 +188,19 @@ export function CallAuditsView({ user, users }: { user: User; users: User[] }) {
           </tbody>
         </table>
       </div>
+
+      {!isLoading && filtered.length > 0 && (
+        <div className="flex items-center justify-between mt-3 font-mono text-xs text-muted-foreground">
+          <span>
+            {(current - 1) * PAGE_SIZE + 1}–{Math.min(current * PAGE_SIZE, filtered.length)} of {filtered.length}
+          </span>
+          <div className="flex items-center gap-2">
+            <Button variant="ghost" size="sm" className="h-7 border border-border disabled:opacity-40" disabled={current <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>Prev</Button>
+            <span>Page {current} / {pageCount}</span>
+            <Button variant="ghost" size="sm" className="h-7 border border-border disabled:opacity-40" disabled={current >= pageCount} onClick={() => setPage((p) => Math.min(pageCount, p + 1))}>Next</Button>
+          </div>
+        </div>
+      )}
 
       <AuditDrawer audit={selected} rubric={selected ? rubricByTeam[selected.team ?? ""] : undefined} agentName={selected ? agentName(selected.agent_id) : ""} viewer={user} onClose={() => setSelected(null)} />
     </div>

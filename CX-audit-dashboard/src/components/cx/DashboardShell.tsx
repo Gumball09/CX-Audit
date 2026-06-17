@@ -101,7 +101,7 @@ export function DashboardShell({ user, onLogout }: { user: User; onLogout: () =>
 
         <main className="flex-1 overflow-auto">
           {view === "calls" && <CallAuditsView user={user} users={users} />}
-          {view === "performance" && <PerformanceView user={user} />}
+          {view === "performance" && <PerformanceView user={user} users={users} />}
           {view === "users" && admin && <AgentRosterView user={user} />}
           {view === "teams" && admin && <AuditPromptsView user={user} />}
           {view === "patterns" && superAdmin && <PatternsView user={user} />}

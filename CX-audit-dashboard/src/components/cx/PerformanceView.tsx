@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   type PerformanceGranularity,
@@ -28,20 +28,35 @@ const GRANULARITIES: PerformanceGranularity[] = ["day", "month", "year"];
  * Performance graphs. A plain `user` sees their own call scores over time; an
  * `admin` sees their whole team; a `super_admin` can switch between teams.
  */
-export function PerformanceView({ user }: { user: User }) {
+export function PerformanceView({ user, users }: { user: User; users: User[] }) {
   const [granularity, setGranularity] = useState<PerformanceGranularity>("month");
   const isUser = user.role === "user";
   const [team, setTeam] = useState<Team>(user.team ?? "CS");
+  const [mode, setMode] = useState<"team" | "agent">("team");
+  const [agentId, setAgentId] = useState<string>("");
   const { data: teamList = [] } = useQuery<TeamRubric[]>({ queryKey: ["teams"], queryFn: fetchTeams, enabled: user.role === "super_admin" });
 
+  // Agents available for the individual view: those carrying an agent_id in the
+  // team in focus (super_admin → the selected team; admin → their own team).
+  const agentUsers = useMemo(
+    () => users.filter((u) => u.agent_id && (user.role === "super_admin" ? u.team === team : u.team === user.team)),
+    [users, team, user.role, user.team]
+  );
+  const agentLabel = (id: string) => users.find((u) => u.agent_id === id)?.name ?? id;
+
+  const wantAgent = !isUser && mode === "agent";
+  const needAgent = wantAgent && !agentId; // individual mode but nothing picked yet
+
   const { data, isLoading } = useQuery<PerformanceResponse>({
-    queryKey: ["performance", isUser ? "me" : team, granularity, user.role],
-    queryFn: () =>
-      isUser
-        ? fetchMyPerformance(granularity)
-        : user.role === "super_admin"
-          ? fetchPerformance("team", team, granularity)
-          : fetchMyPerformance(granularity), // admin → own team via /me
+    queryKey: ["performance", isUser ? "me" : mode, mode === "agent" ? agentId : team, granularity, user.role],
+    enabled: !needAgent,
+    queryFn: () => {
+      if (wantAgent && agentId) return fetchPerformance("agent", agentId, granularity);
+      if (isUser) return fetchMyPerformance(granularity);
+      return user.role === "super_admin"
+        ? fetchPerformance("team", team, granularity)
+        : fetchMyPerformance(granularity); // admin team view via /me
+    },
   });
 
   const series = data?.series ?? [];
@@ -66,19 +81,52 @@ export function PerformanceView({ user }: { user: User }) {
             </button>
           ))}
         </div>
+        {/* Team vs individual scope (admins+; plain users only ever see themselves) */}
+        {!isUser && (
+          <div className="flex border border-border rounded-sm overflow-hidden">
+            {(["team", "agent"] as const).map((m) => (
+              <button
+                key={m}
+                onClick={() => setMode(m)}
+                className={cn(
+                  "px-3 py-1.5 font-mono text-[11px] uppercase tracking-wider transition-colors",
+                  mode === m ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-surface-2"
+                )}
+              >
+                {m === "team" ? "Team" : "Individual"}
+              </button>
+            ))}
+          </div>
+        )}
         {user.role === "super_admin" && (
-          <Select value={team} onValueChange={(v) => setTeam(v as Team)}>
+          <Select value={team} onValueChange={(v) => { setTeam(v as Team); setAgentId(""); }}>
             <SelectTrigger className="w-40 bg-surface border-border"><SelectValue /></SelectTrigger>
             <SelectContent>
               {teamList.map((t) => <SelectItem key={t.team_id} value={t.team_id}>{t.name}</SelectItem>)}
             </SelectContent>
           </Select>
         )}
+        {wantAgent && (
+          <Select value={agentId} onValueChange={setAgentId}>
+            <SelectTrigger className="w-56 bg-surface border-border"><SelectValue placeholder="Select an agent" /></SelectTrigger>
+            <SelectContent>
+              {agentUsers.length === 0
+                ? <div className="px-2 py-1.5 font-mono text-[10px] text-muted-foreground">No agents in this team</div>
+                : agentUsers.map((u) => <SelectItem key={u.user_id} value={u.agent_id!}>{u.name} · {u.agent_id}</SelectItem>)}
+            </SelectContent>
+          </Select>
+        )}
         <span className="font-mono text-[10px] text-muted-foreground">
-          {isUser ? "Your calls" : `Team ${data?.scope?.id ?? team}`}
+          {isUser ? "Your calls" : wantAgent ? (agentId ? `Agent ${agentLabel(agentId)}` : "Pick an agent") : `Team ${data?.scope?.id ?? team}`}
         </span>
       </div>
 
+      {needAgent ? (
+        <div className="border border-border bg-surface rounded-md p-12 text-center font-mono text-xs text-muted-foreground">
+          Select an agent to view individual performance.
+        </div>
+      ) : (
+        <>
       {/* Summary cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <Stat label={`Calls (${granularity})`} value={summary?.total_calls ?? 0} />
@@ -130,6 +178,8 @@ export function PerformanceView({ user }: { user: User }) {
               </BarChart>
             </ResponsiveContainer>
           </ChartCard>
+        </>
+      )}
         </>
       )}
     </div>
