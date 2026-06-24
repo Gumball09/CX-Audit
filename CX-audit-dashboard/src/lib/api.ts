@@ -4,6 +4,9 @@ import type {
   Feedback,
   FeedbackDisposition,
   FeedbackCriterionCorrection,
+  LoginBreakdownResponse,
+  LoginGranularity,
+  LoginTeamsResponse,
   PerformanceGranularity,
   PerformanceResponse,
   PlatformSettings,
@@ -307,6 +310,18 @@ export function fetchPerformance(
 ): Promise<PerformanceResponse> {
   const q = new URLSearchParams({ scope, id, granularity });
   return request<PerformanceResponse>(`/performance?${q.toString()}`);
+}
+
+// ---- sign-in (login) activity --------------------------------------------
+
+/** Per-team sign-in activity + how many teams are actively opening the app. */
+export function fetchLoginTeams(granularity: LoginGranularity): Promise<LoginTeamsResponse> {
+  return request<LoginTeamsResponse>(`/login-stats/teams?granularity=${granularity}`);
+}
+
+/** Sign-in activity broken down by role (admins / users / super_admins / all). */
+export function fetchLoginBreakdown(granularity: LoginGranularity): Promise<LoginBreakdownResponse> {
+  return request<LoginBreakdownResponse>(`/login-stats/breakdown?granularity=${granularity}`);
 }
 
 // ---- platform settings (models) ------------------------------------------

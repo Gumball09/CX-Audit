@@ -118,6 +118,8 @@ export const env = {
   // from comparing AI scores against that feedback.
   DDB_FEEDBACK_TABLE: getEnv("DDB_FEEDBACK_TABLE", false, "cx_feedback"),
   DDB_SUGGESTIONS_TABLE: getEnv("DDB_SUGGESTIONS_TABLE", false, "cx_suggestions"),
+  // Per-role daily/monthly sign-in counters (the DAU/MAU dashboard).
+  DDB_LOGIN_STATS_TABLE: getEnv("DDB_LOGIN_STATS_TABLE", false, "cx_login_stats"),
 };
 
 /**

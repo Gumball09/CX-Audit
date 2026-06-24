@@ -341,6 +341,36 @@ export interface PerformancePoint {
   flagged_count: number;
 }
 
+// Sign-ins are aggregated along two axes: by role ("all" rollup + each role)
+// and by team. Both live in one table, distinguished by the pk prefix
+// (`role#admin`, `role#all`, `team#sales`).
+export type LoginScopeKind = "role" | "team";
+export type LoginRoleScope = "all" | Role;
+export type LoginGranularity = "day" | "month";
+
+/** One time-bucketed sign-in aggregate row in the LoginStats table. */
+export interface LoginStatBucket {
+  pk: string;                  // `${scope_kind}#${scope_id}` (partition key)
+  bucket: string;              // `${granularity}#${period}` (sort key)
+  scope_kind: LoginScopeKind;
+  scope_id: string;            // role name | "all" | team_id
+  granularity: LoginGranularity;
+  period: string;              // e.g. "2026-06-24" | "2026-06"
+  login_count: number;         // total successful sign-in events
+  // Distinct user_ids that signed in during this period, stored as a DynamoDB
+  // string set; `unique_count` is derived from its size at read time. Bounded
+  // by headcount, so well under the 400KB item limit for this workload.
+  seen_users?: Set<string>;
+  updated_at: string;
+}
+
+/** A point in a login-stats time series returned by the API (unique derived). */
+export interface LoginStatPoint {
+  period: string;
+  login_count: number;         // total sign-ins (one user logging in 3x → 3)
+  unique_count: number;        // distinct users who signed in (DAU / MAU)
+}
+
 /** The JSON document persisted to S3 under audits/ for each audited call. */
 export interface AuditDocument {
   audit_id: string;

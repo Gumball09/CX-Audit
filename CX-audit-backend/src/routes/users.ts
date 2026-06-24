@@ -22,10 +22,15 @@ const ROLES: Role[] = ["super_admin", "admin", "user"];
 /** GET /api/users — admins and super_admins may list users. */
 usersRouter.get("/", requireRole("admin", "super_admin"), async (req, res) => {
   const all = await listUsers();
-  // Admins only see their own team (plus themselves).
+  // Admins only see their own team (plus themselves); super_admins see everyone
+  // sorted by role (super_admin → admin → user, per ROLES order) then name.
   const visible =
     req.user!.role === "super_admin"
-      ? all
+      ? [...all].sort(
+          (a, b) =>
+            ROLES.indexOf(a.role) - ROLES.indexOf(b.role) ||
+            (a.name || "").localeCompare(b.name || "")
+        )
       : all.filter((u) => u.team === req.user!.team || u.user_id === req.user!.user_id);
   res.json(visible.map(publicUser));
 });
