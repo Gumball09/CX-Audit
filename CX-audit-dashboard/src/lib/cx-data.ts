@@ -223,6 +223,12 @@ export interface PerformanceResponse {
   summary: PerformanceSummary;
 }
 
+/** Call-outcome counts for a scope, keyed by audit status. */
+export interface StatusCountsResponse {
+  scope: { type: "agent" | "team"; id: string };
+  counts: Record<string, number>;
+}
+
 // ---- sign-in (login) activity --------------------------------------------
 
 export type LoginGranularity = "day" | "month";

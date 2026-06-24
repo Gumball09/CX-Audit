@@ -114,6 +114,7 @@ export type AuditScope =
 
 export interface AuditQuery {
   flagged?: boolean;
+  status?: string; // exact status match (e.g. "failed")
   from?: string; // ISO
   to?: string;   // ISO
   limit?: number;
@@ -137,12 +138,23 @@ function decodeCursor(cursor?: string): Record<string, unknown> | undefined {
   }
 }
 
-/** Build a `flagged = :flagged` FilterExpression fragment (non-key attribute). */
-function flaggedFilter(q: AuditQuery, names: Record<string, string>, values: Record<string, unknown>) {
-  if (q.flagged === undefined) return undefined;
-  names["#flagged"] = "flagged";
-  values[":flagged"] = q.flagged;
-  return "#flagged = :flagged";
+/**
+ * Build the non-key FilterExpression (flagged and/or status). Returns undefined
+ * when neither is set. Mutates `names`/`values` with the bindings it uses.
+ */
+function buildNonKeyFilter(q: AuditQuery, names: Record<string, string>, values: Record<string, unknown>) {
+  const parts: string[] = [];
+  if (q.flagged !== undefined) {
+    names["#flagged"] = "flagged";
+    values[":flagged"] = q.flagged;
+    parts.push("#flagged = :flagged");
+  }
+  if (q.status) {
+    names["#status"] = "status";
+    values[":status"] = q.status;
+    parts.push("#status = :status");
+  }
+  return parts.length ? parts.join(" AND ") : undefined;
 }
 
 /**
@@ -159,7 +171,7 @@ export async function listAudits(scope: AuditScope, q: AuditQuery = {}): Promise
 
   if (scope.kind === "all") {
     const filters: string[] = [];
-    const f = flaggedFilter(q, names, values);
+    const f = buildNonKeyFilter(q, names, values);
     if (f) filters.push(f);
     if (q.from || q.to) {
       names["#dt"] = "call_datetime";
@@ -197,7 +209,7 @@ export async function listAudits(scope: AuditScope, q: AuditQuery = {}): Promise
     TableName: TABLE,
     IndexName: indexName,
     KeyConditionExpression: keyCond,
-    FilterExpression: flaggedFilter(q, names, values),
+    FilterExpression: buildNonKeyFilter(q, names, values),
     ExpressionAttributeNames: names,
     ExpressionAttributeValues: values,
     ScanIndexForward: false, // newest first
@@ -206,4 +218,78 @@ export async function listAudits(scope: AuditScope, q: AuditQuery = {}): Promise
   };
   const res = await ddb.send(new QueryCommand(input));
   return { items: ((res.Items as Record<string, unknown>[]) ?? []).map((i) => fromItem(i)!), nextCursor: encodeCursor(res.LastEvaluatedKey) };
+}
+
+/**
+ * Count audits by status for a scope (and optional date range), e.g. how many
+ * `audited` vs `skipped` calls a team has. Projects only `status` and paginates
+ * fully so the totals are exact. Team/agent scopes use the matching GSI; `all`
+ * scans. Returns a map keyed by status (missing statuses are simply absent).
+ */
+export async function getStatusCounts(
+  scope: AuditScope,
+  q: { from?: string; to?: string } = {}
+): Promise<Record<string, number>> {
+  const counts: Record<string, number> = {};
+  const tally = (items: Record<string, unknown>[] | undefined) => {
+    for (const it of items ?? []) {
+      const s = String((it as { status?: unknown }).status ?? "unknown");
+      counts[s] = (counts[s] ?? 0) + 1;
+    }
+  };
+
+  if (scope.kind === "all") {
+    let start: Record<string, unknown> | undefined;
+    do {
+      const names: Record<string, string> = { "#s": "status" };
+      const values: Record<string, unknown> = {};
+      const filters: string[] = [];
+      if (q.from) { names["#dt"] = "call_datetime"; values[":from"] = q.from; filters.push("#dt >= :from"); }
+      if (q.to) { names["#dt"] = "call_datetime"; values[":to"] = q.to; filters.push("#dt <= :to"); }
+      const res = await ddb.send(
+        new ScanCommand({
+          TableName: TABLE,
+          ProjectionExpression: "#s",
+          ExpressionAttributeNames: names,
+          ExpressionAttributeValues: Object.keys(values).length ? values : undefined,
+          FilterExpression: filters.length ? filters.join(" AND ") : undefined,
+          ExclusiveStartKey: start,
+        })
+      );
+      tally(res.Items as Record<string, unknown>[]);
+      start = res.LastEvaluatedKey as Record<string, unknown> | undefined;
+    } while (start);
+    return counts;
+  }
+
+  const indexName = scope.kind === "team" ? "team-index" : "agent-index";
+  const pkName = scope.kind === "team" ? "team" : "agent_id";
+  let start: Record<string, unknown> | undefined;
+  do {
+    const names: Record<string, string> = { "#pk": pkName, "#s": "status" };
+    const values: Record<string, unknown> = { ":pk": scope.kind === "team" ? scope.team : scope.agentId };
+    let keyCond = "#pk = :pk";
+    if (q.from && q.to) {
+      names["#dt"] = "call_datetime"; values[":from"] = q.from; values[":to"] = q.to;
+      keyCond += " AND #dt BETWEEN :from AND :to";
+    } else if (q.from) {
+      names["#dt"] = "call_datetime"; values[":from"] = q.from; keyCond += " AND #dt >= :from";
+    } else if (q.to) {
+      names["#dt"] = "call_datetime"; values[":to"] = q.to; keyCond += " AND #dt <= :to";
+    }
+    const res = await ddb.send(
+      new QueryCommand({
+        TableName: TABLE,
+        IndexName: indexName,
+        KeyConditionExpression: keyCond,
+        ProjectionExpression: "#s",
+        ExpressionAttributeNames: names,
+        ExpressionAttributeValues: values,
+        ExclusiveStartKey: start,
+      })
+    );
+    tally(res.Items as Record<string, unknown>[]);
+    start = res.LastEvaluatedKey as Record<string, unknown> | undefined;
+  } while (start);
+  return counts;
 }

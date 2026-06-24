@@ -9,6 +9,7 @@ import type {
   LoginTeamsResponse,
   PerformanceGranularity,
   PerformanceResponse,
+  StatusCountsResponse,
   PlatformSettings,
   RecordingPattern,
   Role,
@@ -102,6 +103,7 @@ export function fetchMe(): Promise<User> {
 export interface AuditFilters {
   team?: Team | "All";
   flagged?: boolean;
+  status?: string;
   from?: string;
   to?: string;
   limit?: number;
@@ -118,6 +120,7 @@ export function fetchAuditPage(filters: AuditFilters = {}): Promise<AuditPage> {
   const q = new URLSearchParams();
   if (filters.team && filters.team !== "All") q.set("team", filters.team);
   if (filters.flagged) q.set("flagged", "true");
+  if (filters.status) q.set("status", filters.status);
   if (filters.from) q.set("from", filters.from);
   if (filters.to) q.set("to", filters.to);
   if (filters.limit) q.set("limit", String(filters.limit));
@@ -126,10 +129,21 @@ export function fetchAuditPage(filters: AuditFilters = {}): Promise<AuditPage> {
   return request<AuditPage>(`/audits${qs ? `?${qs}` : ""}`);
 }
 
-/** Convenience: first page as a flat array (used by the current table view). */
+/**
+ * All matching audits as a flat array, following the server cursor across pages.
+ * A DynamoDB scan/query page is capped at 1MB (~750 large audit rows), so a
+ * single page is only a partial slice — we must page through to get a complete,
+ * correctly-counted set for the table view, filters, and CSV export.
+ */
 export async function fetchAudits(filters: AuditFilters = {}): Promise<Audit[]> {
-  const page = await fetchAuditPage({ limit: 500, ...filters });
-  return page.items;
+  const all: Audit[] = [];
+  let cursor: string | undefined = filters.cursor;
+  do {
+    const page: AuditPage = await fetchAuditPage({ limit: 1000, ...filters, cursor });
+    all.push(...page.items);
+    cursor = page.nextCursor;
+  } while (cursor);
+  return all;
 }
 
 export function fetchTranscript(auditId: string): Promise<{ audit_id: string; transcript: string }> {
@@ -310,6 +324,19 @@ export function fetchPerformance(
 ): Promise<PerformanceResponse> {
   const q = new URLSearchParams({ scope, id, granularity });
   return request<PerformanceResponse>(`/performance?${q.toString()}`);
+}
+
+/** Call-outcome counts (audited / skipped / failed / …) for a scope. */
+export function fetchStatusCounts(
+  scope: "agent" | "team",
+  id: string,
+  from?: string,
+  to?: string
+): Promise<StatusCountsResponse> {
+  const q = new URLSearchParams({ scope, id });
+  if (from) q.set("from", from);
+  if (to) q.set("to", to);
+  return request<StatusCountsResponse>(`/performance/status-counts?${q.toString()}`);
 }
 
 // ---- sign-in (login) activity --------------------------------------------
