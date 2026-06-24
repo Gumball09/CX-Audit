@@ -44,6 +44,30 @@ export async function listRecordingKeys(): Promise<string[]> {
   return keys;
 }
 
+/**
+ * List recording keys under a specific prefix in the source bucket, stopping at
+ * `max` (so a huge prefix can't run unbounded). The given prefix is taken
+ * relative to the bucket root; a leading slash is tolerated. Used by bulk-run.
+ */
+export async function listRecordingKeysByPrefix(prefix: string, max = 2000): Promise<string[]> {
+  const keys: string[] = [];
+  const norm = prefix.replace(/^\/+/, "");
+  let token: string | undefined;
+  do {
+    const res = await s3.send(
+      new ListObjectsV2Command({ Bucket: env.S3_RECORDING_BUCKET, Prefix: norm, ContinuationToken: token })
+    );
+    for (const item of res.Contents ?? []) {
+      if (item.Key && isRecordingKey(item.Key)) {
+        keys.push(item.Key);
+        if (keys.length >= max) return keys; // hit the cap — caller flags truncation
+      }
+    }
+    token = res.IsTruncated ? res.NextContinuationToken : undefined;
+  } while (token);
+  return keys;
+}
+
 /** Download a recording. `bucket` defaults to the global recording bucket. */
 export async function getRecordingBuffer(key: string, bucket: string = env.S3_RECORDING_BUCKET): Promise<Buffer> {
   const res = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));

@@ -1,5 +1,6 @@
 import type {
   Audit,
+  BulkRunResult,
   CriterionScore,
   Feedback,
   FeedbackDisposition,
@@ -158,6 +159,21 @@ export function reprocessRecording(recordingKey: string): Promise<{ ok: boolean 
   return request(`/audits/reprocess`, {
     method: "POST",
     body: JSON.stringify({ recording_key: recordingKey }),
+  });
+}
+
+/**
+ * Bulk-run recordings through the pipeline. Provide an explicit `recording_keys`
+ * list or an S3 `prefix`. Pass `dryRun: true` to preview without enqueuing.
+ */
+export function bulkReprocess(input: {
+  recording_keys?: string[];
+  prefix?: string;
+  dryRun?: boolean;
+}): Promise<BulkRunResult> {
+  return request<BulkRunResult>(`/audits/bulk-reprocess`, {
+    method: "POST",
+    body: JSON.stringify(input),
   });
 }
 
