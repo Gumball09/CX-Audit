@@ -229,6 +229,19 @@ export interface StatusCountsResponse {
   counts: Record<string, number>;
 }
 
+/** Result of a bulk-run (preview or real) of recordings through the pipeline. */
+export interface BulkRunResult {
+  dryRun: boolean;
+  total: number;        // candidate keys considered
+  valid: number;        // keys that parsed as real recordings
+  queued: number;       // keys actually enqueued (0 on a dry run)
+  invalid: number;      // keys that failed validation
+  by_team: Record<string, number>; // valid keys split by resolved team ("—" = unmapped)
+  errors: { key: string; reason: string }[];
+  sample?: string[];    // preview: a few of the matched keys
+  truncated: boolean;   // true if the batch was capped
+}
+
 // ---- sign-in (login) activity --------------------------------------------
 
 export type LoginGranularity = "day" | "month";

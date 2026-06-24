@@ -1,18 +1,19 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { type User, canSeeAdmin, roleClass } from "@/lib/cx-data";
-import { Activity, AudioWaveform, BookOpen, Crown, LineChart, LogOut, PhoneCall, Regex, Settings, Users } from "lucide-react";
+import { Activity, AudioWaveform, BookOpen, Crown, LineChart, LogOut, PhoneCall, PlayCircle, Regex, Settings, Users } from "lucide-react";
 import { CallAuditsView } from "./CallAuditsView";
 import { AgentRosterView } from "./AgentRosterView";
 import { AuditPromptsView } from "./AuditPromptsView";
 import { PatternsView } from "./PatternsView";
 import { PerformanceView } from "./PerformanceView";
 import { SignInActivityView } from "./SignInActivityView";
+import { BulkRunView } from "./BulkRunView";
 import { SettingsView } from "./SettingsView";
 import { fetchUsers } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
-type View = "calls" | "performance" | "users" | "teams" | "patterns" | "signins" | "settings";
+type View = "calls" | "performance" | "users" | "teams" | "patterns" | "bulk" | "signins" | "settings";
 
 const VIEW_LABELS: Record<View, string> = {
   calls: "Call Audits",
@@ -20,6 +21,7 @@ const VIEW_LABELS: Record<View, string> = {
   users: "User Management",
   teams: "Team Rubrics",
   patterns: "Recording Patterns",
+  bulk: "Bulk Run",
   signins: "Sign-in Activity",
   settings: "Settings",
 };
@@ -43,6 +45,7 @@ export function DashboardShell({ user, onLogout }: { user: User; onLogout: () =>
     { id: "users", label: "User Management", icon: Users, admin: true },
     { id: "teams", label: "Team Rubrics", icon: BookOpen, admin: true },
     { id: "patterns", label: "Recording Patterns", icon: Regex, superAdmin: true },
+    { id: "bulk", label: "Bulk Run", icon: PlayCircle, superAdmin: true },
     { id: "signins", label: "Sign-in Activity", icon: Activity, superAdmin: true },
     { id: "settings", label: "Settings", icon: Settings, superAdmin: true },
   ];
@@ -108,6 +111,7 @@ export function DashboardShell({ user, onLogout }: { user: User; onLogout: () =>
           {view === "users" && admin && <AgentRosterView user={user} />}
           {view === "teams" && admin && <AuditPromptsView user={user} />}
           {view === "patterns" && superAdmin && <PatternsView user={user} />}
+          {view === "bulk" && superAdmin && <BulkRunView user={user} />}
           {view === "signins" && superAdmin && <SignInActivityView user={user} />}
           {view === "settings" && superAdmin && <SettingsView user={user} />}
         </main>
