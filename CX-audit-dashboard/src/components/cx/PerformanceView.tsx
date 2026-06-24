@@ -3,11 +3,12 @@ import { useQuery } from "@tanstack/react-query";
 import {
   type PerformanceGranularity,
   type PerformanceResponse,
+  type StatusCountsResponse,
   type Team,
   type TeamRubric,
   type User,
 } from "@/lib/cx-data";
-import { fetchMyPerformance, fetchPerformance, fetchTeams } from "@/lib/api";
+import { fetchMyPerformance, fetchPerformance, fetchStatusCounts, fetchTeams } from "@/lib/api";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   Area,
@@ -62,6 +63,24 @@ export function PerformanceView({ user, users }: { user: User; users: User[] }) 
   const series = data?.series ?? [];
   const summary = data?.summary;
   const delta = summary?.score_delta;
+
+  // Resolve the same scope the chart is showing, for the call-outcome counts
+  // (audited/skipped come from the audits table, not the perf aggregates).
+  let countScope: "agent" | "team" | null = null;
+  let countId: string | undefined;
+  if (wantAgent && agentId) { countScope = "agent"; countId = agentId; }
+  else if (isUser && user.agent_id) { countScope = "agent"; countId = user.agent_id; }
+  else if (user.role === "super_admin") { countScope = "team"; countId = team; }
+  else if (user.team) { countScope = "team"; countId = user.team; }
+  else if (user.agent_id) { countScope = "agent"; countId = user.agent_id; }
+
+  const { data: statusCounts } = useQuery<StatusCountsResponse>({
+    queryKey: ["status-counts", countScope, countId, user.role],
+    enabled: !needAgent && !!countScope && !!countId,
+    queryFn: () => fetchStatusCounts(countScope!, countId!),
+  });
+  const audited = statusCounts?.counts.audited ?? summary?.total_calls ?? 0;
+  const skipped = statusCounts?.counts.skipped ?? 0;
 
   return (
     <div className="p-6 space-y-6 max-w-5xl">
@@ -128,8 +147,9 @@ export function PerformanceView({ user, users }: { user: User; users: User[] }) 
       ) : (
         <>
       {/* Summary cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <Stat label={`Calls (${granularity})`} value={summary?.total_calls ?? 0} />
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+        <Stat label="Audited" value={audited} />
+        <Stat label="Skipped" value={skipped} />
         <Stat label="Avg score" value={summary?.avg_score ?? 0} />
         <Stat label="Flagged" value={summary?.total_flagged ?? 0} />
         <Stat

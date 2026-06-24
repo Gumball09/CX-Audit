@@ -32,7 +32,7 @@ function canView(user: User, audit: AuditRecord): boolean {
 auditsRouter.get("/", async (req, res) => {
   const user = req.user!;
   const view = auditScope(user.role);
-  const { team, flagged, from, to, limit, cursor } = req.query as Record<string, string>;
+  const { team, flagged, status, from, to, limit, cursor } = req.query as Record<string, string>;
 
   let scope: AuditScope;
   if (view === "all") {
@@ -48,6 +48,7 @@ auditsRouter.get("/", async (req, res) => {
 
   const page = await listAudits(scope, {
     flagged: flagged === "true" ? true : undefined,
+    status: status || undefined,
     from: from || undefined,
     to: to || undefined,
     limit: limit ? Number(limit) : undefined,

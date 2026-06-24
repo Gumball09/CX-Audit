@@ -42,6 +42,7 @@ export function CallAuditsView({ user, users }: { user: User; users: User[] }) {
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [flaggedOnly, setFlaggedOnly] = useState(false);
+  const [failedOnly, setFailedOnly] = useState(false);
   const [selected, setSelected] = useState<Audit | null>(null);
 
   const PAGE_SIZE = 50;
@@ -50,9 +51,12 @@ export function CallAuditsView({ user, users }: { user: User; users: User[] }) {
   const filters: AuditFilters = {
     team,
     flagged: flaggedOnly,
+    // Failed calls are the unmapped ones (no agent→team mapping). This surfaces
+    // them for cleanup; filtered server-side so it spans the whole table.
+    status: failedOnly ? "failed" : undefined,
     from: from ? `${from}T00:00:00.000Z` : undefined,
     to: to ? `${to}T23:59:59.999Z` : undefined,
-    limit: 1000, // pull a generous set; pagination below keeps the view to 50/page
+    limit: 1000, // page size; fetchAudits follows the cursor for the full set
   };
 
   const { data: audits = [], isLoading } = useQuery<Audit[]>({
@@ -82,7 +86,7 @@ export function CallAuditsView({ user, users }: { user: User; users: User[] }) {
 
   // Client-side pagination: 50 rows/page over the filtered set. Reset to page 1
   // whenever the filters or search change so we never land on an empty page.
-  useEffect(() => { setPage(1); }, [team, flaggedOnly, from, to, agentQ]);
+  useEffect(() => { setPage(1); }, [team, flaggedOnly, failedOnly, from, to, agentQ]);
   const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const current = Math.min(page, pageCount);
   const pageItems = filtered.slice((current - 1) * PAGE_SIZE, current * PAGE_SIZE);
@@ -140,6 +144,10 @@ export function CallAuditsView({ user, users }: { user: User; users: User[] }) {
         <div className="flex items-center gap-2 h-9">
           <Switch checked={flaggedOnly} onCheckedChange={setFlaggedOnly} id="flagged" />
           <label htmlFor="flagged" className="font-mono text-xs text-muted-foreground cursor-pointer">Flagged only</label>
+        </div>
+        <div className="flex items-center gap-2 h-9">
+          <Switch checked={failedOnly} onCheckedChange={setFailedOnly} id="failed" />
+          <label htmlFor="failed" className="font-mono text-xs text-muted-foreground cursor-pointer">Failed only</label>
         </div>
         <Button variant="ghost" onClick={exportCsv} className="font-mono text-xs h-9 border border-border hover:bg-surface-2">
           <Download className="h-3.5 w-3.5 mr-1.5" /> Export CSV

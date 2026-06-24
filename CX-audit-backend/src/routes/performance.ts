@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { getPerformanceSeries } from "../db/performance.js";
+import { getStatusCounts, type AuditScope } from "../db/audits.js";
 import { getUserByAgentId } from "../db/users.js";
 import type { PerformanceGranularity, PerformancePoint, PerformanceScopeType, User } from "../types.js";
 
@@ -73,6 +74,24 @@ performanceRouter.get("/me", async (req, res) => {
 
   const series = await getPerformanceSeries(scopeType, scopeId, granularity);
   res.json({ scope: { type: scopeType, id: scopeId }, granularity, series, summary: summarize(series) });
+});
+
+/**
+ * GET /api/performance/status-counts?scope=agent|team&id=<id>&from&to
+ * Call-outcome counts (audited / skipped / failed / …) for a scope, sourced from
+ * the audits table so they're exact and include historical data. RBAC-enforced.
+ */
+performanceRouter.get("/status-counts", async (req, res) => {
+  const { scope, id, from, to } = req.query as Record<string, string>;
+  const scopeType = scope === "team" ? "team" : scope === "agent" ? "agent" : null;
+  if (!scopeType || !id) return res.status(400).json({ message: "scope (agent|team) and id are required." });
+  if (!(await authorizeScope(req.user!, scopeType, id))) {
+    return res.status(403).json({ message: "Out of scope." });
+  }
+  const auditScope: AuditScope =
+    scopeType === "team" ? { kind: "team", team: id } : { kind: "agent", agentId: id };
+  const counts = await getStatusCounts(auditScope, { from: from || undefined, to: to || undefined });
+  res.json({ scope: { type: scopeType, id }, counts });
 });
 
 /**
