@@ -18,6 +18,7 @@ import { rubricsRouter } from "./routes/rubrics.js";
 import { feedbackRouter } from "./routes/feedback.js";
 import { suggestionsRouter } from "./routes/suggestions.js";
 import { loginStatsRouter } from "./routes/loginStats.js";
+import { docsRouter } from "./routes/docs.js";
 
 validateEnv("api");
 initSentry("api");
@@ -56,6 +57,9 @@ app.get("/api/health", (_req, res) =>
   })
 );
 app.use("/api/auth", authLimiter, authRouter);
+
+// API docs (Swagger UI). Self-gates: open in dev, super_admin-only in prod.
+app.use("/api/docs", docsRouter);
 
 // ---- Authenticated routes ----
 app.use("/api/users", authenticate, usersRouter);
