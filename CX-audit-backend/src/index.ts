@@ -17,6 +17,7 @@ import { settingsRouter } from "./routes/settings.js";
 import { rubricsRouter } from "./routes/rubrics.js";
 import { feedbackRouter } from "./routes/feedback.js";
 import { suggestionsRouter } from "./routes/suggestions.js";
+import { loginStatsRouter } from "./routes/loginStats.js";
 
 validateEnv("api");
 initSentry("api");
@@ -66,6 +67,7 @@ app.use("/api/settings", authenticate, settingsRouter);
 app.use("/api/rubrics", authenticate, rubricsRouter);
 app.use("/api/feedback", authenticate, feedbackRouter);
 app.use("/api/suggestions", authenticate, suggestionsRouter);
+app.use("/api/login-stats", authenticate, loginStatsRouter);
 
 // 404 + error handlers.
 app.use((req: Request, res: Response) =>

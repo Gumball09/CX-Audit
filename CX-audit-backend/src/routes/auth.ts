@@ -2,6 +2,7 @@ import { Router } from "express";
 import { logger } from "../logger.js";
 import { isEmail, isValidPassword, MIN_PASSWORD_LENGTH } from "../validation.js";
 import { getUserByEmail, setUserPassword } from "../db/users.js";
+import { recordLogin } from "../db/loginStats.js";
 import { signToken, authenticate, publicUser } from "../services/auth.js";
 import { hashPassword, verifyPassword } from "../lib/password.js";
 
@@ -38,6 +39,8 @@ authRouter.post("/login", async (req, res) => {
     return res.status(401).json({ message: "Incorrect email or password." });
   }
 
+  // Fire-and-forget: count the sign-in without delaying the response.
+  void recordLogin(user);
   return res.json({ token: signToken(user), user: publicUser(user) });
 });
 
@@ -67,6 +70,7 @@ authRouter.post("/set-password", async (req, res) => {
   const updated = await setUserPassword(user.user_id, hash);
   const fresh = updated ?? { ...user, password_hash: hash };
   logger.info(`Password set (first login) for ${email}`);
+  void recordLogin(fresh);
   return res.json({ token: signToken(fresh), user: publicUser(fresh) });
 });
 

@@ -223,6 +223,52 @@ export interface PerformanceResponse {
   summary: PerformanceSummary;
 }
 
+// ---- sign-in (login) activity --------------------------------------------
+
+export type LoginGranularity = "day" | "month";
+export type LoginRoleScope = "all" | Role;
+
+export interface LoginStatPoint {
+  period: string;
+  login_count: number;  // total sign-ins (one user logging in 3x → 3)
+  unique_count: number; // distinct users who signed in (DAU / MAU)
+}
+
+export interface LoginStatSummary {
+  total_logins: number;
+  periods: number;
+  latest_period: string | null;
+  latest_logins: number;
+  latest_unique: number;
+  unique_delta: number | null;
+}
+
+export interface LoginRoleSeries {
+  scope: LoginRoleScope;
+  series: LoginStatPoint[];
+  summary: LoginStatSummary;
+}
+
+export interface LoginBreakdownResponse {
+  granularity: LoginGranularity;
+  breakdown: LoginRoleSeries[];
+}
+
+export interface LoginTeamSeries {
+  team_id: string;
+  name: string;
+  series: LoginStatPoint[];
+  summary: LoginStatSummary;
+}
+
+export interface LoginTeamsResponse {
+  granularity: LoginGranularity;
+  total_teams: number;
+  active_teams: number;
+  latest_period: string | null;
+  teams: LoginTeamSeries[];
+}
+
 export interface PlatformSettings {
   setting_id: string;
   transcription_model: string;

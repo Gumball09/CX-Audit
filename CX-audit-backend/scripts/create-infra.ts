@@ -185,6 +185,21 @@ const tables: CreateTableCommandInput[] = [
       },
     ],
   },
+  {
+    // Per-role daily/monthly sign-in counters: pk=`role#<scope>`, bucket=
+    // `<granularity>#<period>` (e.g. role#admin / day#2026-06-24). Mirrors the
+    // performance table; each row holds login_count + a distinct-user set.
+    TableName: env.DDB_LOGIN_STATS_TABLE,
+    BillingMode: PAY,
+    AttributeDefinitions: [
+      { AttributeName: "pk", AttributeType: S },
+      { AttributeName: "bucket", AttributeType: S },
+    ],
+    KeySchema: [
+      { AttributeName: "pk", KeyType: "HASH" },
+      { AttributeName: "bucket", KeyType: "RANGE" },
+    ],
+  },
 ];
 
 async function createTables() {
