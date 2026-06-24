@@ -15,23 +15,42 @@ import { openapiSpec } from "../lib/openapi.js";
  */
 export const docsRouter = Router();
 
-// Swagger UI injects inline scripts/styles; relax the global helmet CSP for
-// these routes only (the API itself keeps the strict default).
+const DOCS_COOKIE = "cx_docs_token";
+
+/** Read a single cookie value from the raw Cookie header (no extra dependency). */
+function readCookie(header: string | undefined, name: string): string | null {
+  if (!header) return null;
+  for (const part of header.split(";")) {
+    const eq = part.indexOf("=");
+    if (eq === -1) continue;
+    if (part.slice(0, eq).trim() === name) return decodeURIComponent(part.slice(eq + 1).trim());
+  }
+  return null;
+}
+
+// Swagger UI injects inline scripts/styles and its bundle uses eval; relax the
+// global helmet CSP for these routes only (the API keeps the strict default).
 docsRouter.use((_req: Request, res: Response, next: NextFunction) => {
   res.setHeader(
     "Content-Security-Policy",
-    "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:"
+    "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:"
   );
   next();
 });
 
-// Access gate.
+// Access gate. The token may arrive via a Bearer header, a `?token=` query
+// param (browser navigation), or the docs cookie. When it comes via the query
+// we persist it as a cookie and redirect to the clean URL — Swagger UI's own
+// asset requests are relative and carry no query string, so without the cookie
+// they'd hit this gate unauthenticated (blank page).
 docsRouter.use(async (req: Request, res: Response, next: NextFunction) => {
   if (env.NODE_ENV !== "production") return next(); // open in dev/staging
 
   const header = req.headers.authorization ?? "";
   const bearer = header.startsWith("Bearer ") ? header.slice(7) : null;
-  const token = bearer || (typeof req.query.token === "string" ? req.query.token : null);
+  const queryTok = typeof req.query.token === "string" ? req.query.token : null;
+  const cookieTok = readCookie(req.headers.cookie, DOCS_COOKIE);
+  const token = bearer || queryTok || cookieTok;
   if (!token) {
     return res
       .status(401)
@@ -43,6 +62,15 @@ docsRouter.use(async (req: Request, res: Response, next: NextFunction) => {
     const user = await getUser(payload.sub);
     if (!user || user.status !== "active" || user.role !== "super_admin") {
       return res.status(403).type("text/plain").send("API docs are restricted to super_admins.");
+    }
+    // Token came in via the URL — store it for subsequent asset requests and
+    // drop it from the address bar.
+    if (queryTok && !cookieTok) {
+      res.setHeader(
+        "Set-Cookie",
+        `${DOCS_COOKIE}=${encodeURIComponent(token)}; Path=/api/docs; HttpOnly; Secure; SameSite=Lax; Max-Age=43200`
+      );
+      return res.redirect(req.originalUrl.split("?")[0]);
     }
     return next();
   } catch (err) {
