@@ -11,6 +11,7 @@ const CACHE_TTL_MS = 60_000; // read on the pipeline hot path — cache it
 export interface ModelSettings {
   transcription_model: string;
   audit_model: string;
+  min_audit_duration_sec: number;
 }
 
 /** Read the settings row, filling any missing value from the env fallback. */
@@ -21,6 +22,8 @@ export async function getSettings(): Promise<PlatformSettings> {
     setting_id: SINGLETON,
     transcription_model: item?.transcription_model || env.OPENAI_TRANSCRIPTION_MODEL,
     audit_model: item?.audit_model || env.OPENAI_AUDIT_MODEL,
+    min_audit_duration_sec:
+      item?.min_audit_duration_sec != null ? item.min_audit_duration_sec : env.MIN_CALL_DURATION_SECONDS,
     updated_at: item?.updated_at ?? "",
     updated_by: item?.updated_by ?? null,
   };
@@ -42,12 +45,17 @@ export async function getModelSettingsCached(): Promise<ModelSettings> {
   let val: ModelSettings = {
     transcription_model: env.OPENAI_TRANSCRIPTION_MODEL,
     audit_model: env.OPENAI_AUDIT_MODEL,
+    min_audit_duration_sec: env.MIN_CALL_DURATION_SECONDS,
   };
   try {
     const s = await getSettings();
-    val = { transcription_model: s.transcription_model, audit_model: s.audit_model };
+    val = {
+      transcription_model: s.transcription_model,
+      audit_model: s.audit_model,
+      min_audit_duration_sec: s.min_audit_duration_sec ?? env.MIN_CALL_DURATION_SECONDS,
+    };
   } catch (err) {
-    logger.warn("Could not load platform settings; using env model defaults", err);
+    logger.warn("Could not load platform settings; using env defaults", err);
   }
   cache = { at: Date.now(), val };
   return val;
@@ -55,7 +63,7 @@ export async function getModelSettingsCached(): Promise<ModelSettings> {
 
 /** Persist a settings patch (super_admin). Returns the merged settings row. */
 export async function putSettings(
-  patch: Partial<Pick<PlatformSettings, "transcription_model" | "audit_model">>,
+  patch: Partial<Pick<PlatformSettings, "transcription_model" | "audit_model" | "min_audit_duration_sec">>,
   updatedBy: string | null
 ): Promise<PlatformSettings> {
   const current = await getSettings();

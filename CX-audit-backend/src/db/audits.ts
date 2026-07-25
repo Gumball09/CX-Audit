@@ -115,6 +115,7 @@ export type AuditScope =
 export interface AuditQuery {
   flagged?: boolean;
   status?: string; // exact status match (e.g. "failed")
+  excludeSkipped?: boolean; // hide skipped rows (ignored when `status` is set)
   from?: string; // ISO
   to?: string;   // ISO
   limit?: number;
@@ -153,8 +154,20 @@ function buildNonKeyFilter(q: AuditQuery, names: Record<string, string>, values:
     names["#status"] = "status";
     values[":status"] = q.status;
     parts.push("#status = :status");
+  } else if (q.excludeSkipped) {
+    names["#status"] = "status";
+    values[":skipped"] = "skipped";
+    parts.push("#status <> :skipped");
   }
   return parts.length ? parts.join(" AND ") : undefined;
+}
+
+/** Rebuild an ExclusiveStartKey from a returned item, to resume strictly after
+ *  it (used when a page over-fetches past `limit` due to the skipped filter). */
+function keyOf(scope: AuditScope, item: AuditRecord): Record<string, unknown> {
+  if (scope.kind === "team") return { audit_id: item.audit_id, team: item.team, call_datetime: item.call_datetime };
+  if (scope.kind === "agent") return { audit_id: item.audit_id, agent_id: item.agent_id, call_datetime: item.call_datetime };
+  return { audit_id: item.audit_id };
 }
 
 /**
@@ -165,59 +178,91 @@ function buildNonKeyFilter(q: AuditQuery, names: Record<string, string>, values:
  */
 export async function listAudits(scope: AuditScope, q: AuditQuery = {}): Promise<AuditPage> {
   const limit = Math.min(Math.max(q.limit ?? DEFAULT_LIMIT, 1), MAX_LIMIT);
-  const start = decodeCursor(q.cursor);
-  const names: Record<string, string> = {};
-  const values: Record<string, unknown> = {};
+  // Over-fetch per DynamoDB call so the post-`Limit` skipped filter still fills a
+  // full page in ~one round trip (skipped can be a large fraction of rows).
+  const pageLimit = Math.min(limit * 3, MAX_LIMIT);
 
-  if (scope.kind === "all") {
-    const filters: string[] = [];
-    const f = buildNonKeyFilter(q, names, values);
-    if (f) filters.push(f);
-    if (q.from || q.to) {
-      names["#dt"] = "call_datetime";
-      if (q.from) { values[":from"] = q.from; filters.push("#dt >= :from"); }
-      if (q.to) { values[":to"] = q.to; filters.push("#dt <= :to"); }
+  // One raw DynamoDB page — Scan for the `all` scope, Query on the GSI otherwise.
+  const fetchPage = async (
+    exclusiveStart?: Record<string, unknown>
+  ): Promise<{ items: AuditRecord[]; last?: Record<string, unknown> }> => {
+    const names: Record<string, string> = {};
+    const values: Record<string, unknown> = {};
+
+    if (scope.kind === "all") {
+      const filters: string[] = [];
+      const f = buildNonKeyFilter(q, names, values);
+      if (f) filters.push(f);
+      if (q.from || q.to) {
+        names["#dt"] = "call_datetime";
+        if (q.from) { values[":from"] = q.from; filters.push("#dt >= :from"); }
+        if (q.to) { values[":to"] = q.to; filters.push("#dt <= :to"); }
+      }
+      const input: ScanCommandInput = {
+        TableName: TABLE,
+        Limit: pageLimit,
+        ExclusiveStartKey: exclusiveStart,
+        FilterExpression: filters.length ? filters.join(" AND ") : undefined,
+        ExpressionAttributeNames: Object.keys(names).length ? names : undefined,
+        ExpressionAttributeValues: Object.keys(values).length ? values : undefined,
+      };
+      const res = await ddb.send(new ScanCommand(input));
+      return {
+        items: ((res.Items as Record<string, unknown>[]) ?? []).map((i) => fromItem(i)!),
+        last: res.LastEvaluatedKey as Record<string, unknown> | undefined,
+      };
     }
-    const input: ScanCommandInput = {
+
+    // team / agent -> GSI query with optional date range on the sort key.
+    const indexName = scope.kind === "team" ? "team-index" : "agent-index";
+    const pkName = scope.kind === "team" ? "team" : "agent_id";
+    names["#pk"] = pkName;
+    values[":pk"] = scope.kind === "team" ? scope.team : scope.agentId;
+    let keyCond = "#pk = :pk";
+    if (q.from && q.to) {
+      names["#dt"] = "call_datetime"; values[":from"] = q.from; values[":to"] = q.to;
+      keyCond += " AND #dt BETWEEN :from AND :to";
+    } else if (q.from) {
+      names["#dt"] = "call_datetime"; values[":from"] = q.from; keyCond += " AND #dt >= :from";
+    } else if (q.to) {
+      names["#dt"] = "call_datetime"; values[":to"] = q.to; keyCond += " AND #dt <= :to";
+    }
+    const input: QueryCommandInput = {
       TableName: TABLE,
-      Limit: limit,
-      ExclusiveStartKey: start,
-      FilterExpression: filters.length ? filters.join(" AND ") : undefined,
-      ExpressionAttributeNames: Object.keys(names).length ? names : undefined,
-      ExpressionAttributeValues: Object.keys(values).length ? values : undefined,
+      IndexName: indexName,
+      KeyConditionExpression: keyCond,
+      FilterExpression: buildNonKeyFilter(q, names, values),
+      ExpressionAttributeNames: names,
+      ExpressionAttributeValues: values,
+      ScanIndexForward: false, // newest first
+      Limit: pageLimit,
+      ExclusiveStartKey: exclusiveStart,
     };
-    const res = await ddb.send(new ScanCommand(input));
-    return { items: ((res.Items as Record<string, unknown>[]) ?? []).map((i) => fromItem(i)!), nextCursor: encodeCursor(res.LastEvaluatedKey) };
-  }
-
-  // team / agent -> GSI query with optional date range on the sort key.
-  const indexName = scope.kind === "team" ? "team-index" : "agent-index";
-  const pkName = scope.kind === "team" ? "team" : "agent_id";
-  names["#pk"] = pkName;
-  values[":pk"] = scope.kind === "team" ? scope.team : scope.agentId;
-  let keyCond = "#pk = :pk";
-  if (q.from && q.to) {
-    names["#dt"] = "call_datetime"; values[":from"] = q.from; values[":to"] = q.to;
-    keyCond += " AND #dt BETWEEN :from AND :to";
-  } else if (q.from) {
-    names["#dt"] = "call_datetime"; values[":from"] = q.from; keyCond += " AND #dt >= :from";
-  } else if (q.to) {
-    names["#dt"] = "call_datetime"; values[":to"] = q.to; keyCond += " AND #dt <= :to";
-  }
-
-  const input: QueryCommandInput = {
-    TableName: TABLE,
-    IndexName: indexName,
-    KeyConditionExpression: keyCond,
-    FilterExpression: buildNonKeyFilter(q, names, values),
-    ExpressionAttributeNames: names,
-    ExpressionAttributeValues: values,
-    ScanIndexForward: false, // newest first
-    Limit: limit,
-    ExclusiveStartKey: start,
+    const res = await ddb.send(new QueryCommand(input));
+    return {
+      items: ((res.Items as Record<string, unknown>[]) ?? []).map((i) => fromItem(i)!),
+      last: res.LastEvaluatedKey as Record<string, unknown> | undefined,
+    };
   };
-  const res = await ddb.send(new QueryCommand(input));
-  return { items: ((res.Items as Record<string, unknown>[]) ?? []).map((i) => fromItem(i)!), nextCursor: encodeCursor(res.LastEvaluatedKey) };
+
+  // Accumulate across DynamoDB pages until we have `limit` filtered rows.
+  const collected: AuditRecord[] = [];
+  let start = decodeCursor(q.cursor);
+  let last: Record<string, unknown> | undefined;
+  for (let i = 0; i < 25 && collected.length < limit; i++) {
+    const page = await fetchPage(start);
+    collected.push(...page.items);
+    last = page.last;
+    start = page.last;
+    if (!page.last) break;
+  }
+
+  const items = collected.slice(0, limit);
+  // If a page pushed us past `limit`, resume strictly after the last returned
+  // item (not the page's LastEvaluatedKey, which would skip the surplus rows).
+  const nextCursor =
+    collected.length > limit ? encodeCursor(keyOf(scope, items[items.length - 1])) : encodeCursor(last);
+  return { items, nextCursor };
 }
 
 /**

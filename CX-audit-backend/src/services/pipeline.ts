@@ -1,4 +1,3 @@
-import { env } from "../env.js";
 import { logger } from "../logger.js";
 import { resolveRecordingMeta, buildAuditId } from "../lib/filename.js";
 import {
@@ -13,7 +12,7 @@ import { probeBufferDurationSec } from "../lib/audio.js";
 import { transcribeAudio, auditTranscript } from "./openai.js";
 import { getUserByAgentId } from "../db/users.js";
 import { getTeam } from "../db/teams.js";
-import { createAuditIfAbsent, getAudit, updateAudit, setStatus } from "../db/audits.js";
+import { createAuditIfAbsent, getAudit, updateAudit, setStatus, getStatusCounts } from "../db/audits.js";
 import { listRubricsByTeam } from "../db/rubrics.js";
 import { recordAuditPerformance } from "../db/performance.js";
 import { getModelSettingsCached } from "../db/settings.js";
@@ -79,19 +78,48 @@ export async function processTranscription(recordingKey: string, queueTeamId: st
   await setStatus(auditId, "transcribing");
   const buffer = await getRecordingBuffer(recordingKey, infra.recording_bucket);
 
-  // Gate on call length: recordings shorter than the configured minimum are too
-  // short to score, so mark them `skipped` and stop before incurring any
-  // transcription/audit cost. Fail open — a 0 (unprobeable) duration is NOT
-  // skipped. `duration_sec` is also stored for display on longer calls.
   const durationSec = await probeBufferDurationSec(buffer, meta.file_name);
-  const minDuration = env.MIN_CALL_DURATION_SECONDS;
+  const settings = await getModelSettingsCached();
+
+  // Gate 1 — call length: recordings shorter than the configured minimum audit
+  // duration are skipped before incurring any transcription/audit cost. Fail
+  // open — a 0 (unprobeable) duration is NOT skipped. The threshold is the
+  // runtime-configurable `min_audit_duration_sec` (env fallback).
+  const minDuration = settings.min_audit_duration_sec;
   if (minDuration > 0 && durationSec > 0 && durationSec < minDuration) {
-    await updateAudit(auditId, { status: "skipped", duration_sec: Math.round(durationSec) });
+    await updateAudit(auditId, { status: "skipped", skip_reason: "too_short", duration_sec: Math.round(durationSec) });
     logger.info(`Skipping ${auditId} — call too short (${durationSec.toFixed(1)}s < ${minDuration}s)`);
     return;
   }
 
-  const { transcription_model } = await getModelSettingsCached();
+  // Gate 2 — per-agent daily audit cap (per-team, admin-set). Count this agent's
+  // calls already committed past this gate on the call's date (transcribed /
+  // auditing / audited — the current call is still `transcribing`, so it's
+  // excluded); skip once the cap is reached. Best-effort under concurrency: a
+  // few messages for the same agent/day can slip past together.
+  if (team) {
+    const teamRow = await getTeam(team);
+    const cap = teamRow?.daily_audit_cap ?? 0;
+    if (cap > 0) {
+      const day = meta.call_datetime.slice(0, 10); // YYYY-MM-DD
+      const counts = await getStatusCounts(
+        { kind: "agent", agentId: meta.agent_id },
+        { from: `${day}T00:00:00.000Z`, to: `${day}T23:59:59.999Z` }
+      );
+      const committed = (counts.transcribed ?? 0) + (counts.auditing ?? 0) + (counts.audited ?? 0);
+      if (committed >= cap) {
+        await updateAudit(auditId, {
+          status: "skipped",
+          skip_reason: "daily_cap",
+          duration_sec: durationSec > 0 ? Math.round(durationSec) : undefined,
+        });
+        logger.info(`Skipping ${auditId} — daily cap reached for agent ${meta.agent_id} (${committed}/${cap} on ${day})`);
+        return;
+      }
+    }
+  }
+
+  const { transcription_model } = settings;
   const transcript = await transcribeAudio(buffer, meta.file_name, transcription_model);
   const transcriptionKey = await saveTranscription(transcript, auditId, infra.output_bucket);
 

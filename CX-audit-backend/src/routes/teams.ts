@@ -12,6 +12,13 @@ export const teamsRouter = Router();
 // the DynamoDB key and the value stored on users/audits, so keep it URL-safe.
 const TEAM_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/;
 
+/** Coerce the daily audit cap to a non-negative integer (0/unset = unlimited). */
+function sanitizeCap(v: unknown): number | undefined {
+  if (v === undefined || v === null || v === "") return undefined;
+  const n = Math.floor(Number(v));
+  return Number.isFinite(n) && n >= 0 ? n : undefined;
+}
+
 /** Coerce/validate the optional per-team infra block. Returns undefined if absent. */
 function sanitizeInfra(raw: unknown): TeamInfra | undefined {
   if (raw === undefined || raw === null) return undefined;
@@ -68,6 +75,7 @@ teamsRouter.post("/", requireRole("super_admin"), async (req, res) => {
     scale_max: b.scale_max ?? 100,
     flag_threshold: b.flag_threshold ?? 70,
     critical_criterion_threshold: b.critical_criterion_threshold ?? 60,
+    daily_audit_cap: sanitizeCap(b.daily_audit_cap),
     infra: sanitizeInfra(b.infra),
     active: true,
     created_at: now,
@@ -111,6 +119,8 @@ teamsRouter.patch("/:id", requireRole("admin", "super_admin"), async (req, res) 
     ...patch,
     // never let these be overwritten by the patch body
     team_id: id,
+    daily_audit_cap:
+      patch.daily_audit_cap !== undefined ? sanitizeCap(patch.daily_audit_cap) : existing.daily_audit_cap,
     infra: patch.infra !== undefined ? sanitizeInfra(patch.infra) : existing.infra,
     active: patch.active !== undefined ? !!patch.active : existing.active,
     created_at: existing.created_at,

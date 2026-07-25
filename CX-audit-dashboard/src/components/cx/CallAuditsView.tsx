@@ -18,6 +18,7 @@ import {
 } from "@/lib/cx-data";
 import {
   fetchAudits,
+  fetchAuditPage,
   fetchTranscript,
   reauditCall,
   fetchTeams,
@@ -26,6 +27,7 @@ import {
   createFeedback,
   deleteFeedback,
   type AuditFilters,
+  type AuditPage,
 } from "@/lib/api";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -45,8 +47,11 @@ export function CallAuditsView({ user, users }: { user: User; users: User[] }) {
   const [failedOnly, setFailedOnly] = useState(false);
   const [selected, setSelected] = useState<Audit | null>(null);
 
-  const PAGE_SIZE = 50;
-  const [page, setPage] = useState(1);
+  const PAGE_SIZE = 25;
+  // Server-side cursor pagination: `cursor` is the current page's start cursor
+  // (undefined = first page); `stack` holds prior pages' cursors for Prev.
+  const [cursor, setCursor] = useState<string | undefined>(undefined);
+  const [stack, setStack] = useState<(string | undefined)[]>([]);
 
   const filters: AuditFilters = {
     team,
@@ -56,12 +61,14 @@ export function CallAuditsView({ user, users }: { user: User; users: User[] }) {
     status: failedOnly ? "failed" : undefined,
     from: from ? `${from}T00:00:00.000Z` : undefined,
     to: to ? `${to}T23:59:59.999Z` : undefined,
-    limit: 1000, // page size; fetchAudits follows the cursor for the full set
   };
 
-  const { data: audits = [], isLoading } = useQuery<Audit[]>({
-    queryKey: ["audits", filters],
-    queryFn: () => fetchAudits(filters),
+  // One page of 25. The API hides `skipped` rows by default (no status filter),
+  // and only 25 rows are fetched per page so rendering stays fast.
+  const { data: pageData, isLoading } = useQuery<AuditPage>({
+    queryKey: ["audits", filters, cursor],
+    queryFn: () => fetchAuditPage({ ...filters, limit: PAGE_SIZE, cursor }),
+    placeholderData: (prev) => prev,
   });
 
   // Team filter options come from the live team list (includes new teams).
@@ -78,23 +85,41 @@ export function CallAuditsView({ user, users }: { user: User; users: User[] }) {
   );
   const agentName = (agentId: string) => userByAgent[agentId]?.name ?? agentId;
 
-  const filtered = audits.filter((a) => {
+  // Agent search narrows the current page (client-side).
+  const pageItems = (pageData?.items ?? []).filter((a) => {
     if (!agentQ) return true;
     const q = agentQ.toLowerCase();
     return a.agent_id.includes(q) || agentName(a.agent_id).toLowerCase().includes(q);
   });
 
-  // Client-side pagination: 50 rows/page over the filtered set. Reset to page 1
-  // whenever the filters or search change so we never land on an empty page.
-  useEffect(() => { setPage(1); }, [team, flaggedOnly, failedOnly, from, to, agentQ]);
-  const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
-  const current = Math.min(page, pageCount);
-  const pageItems = filtered.slice((current - 1) * PAGE_SIZE, current * PAGE_SIZE);
+  const hasNext = !!pageData?.nextCursor;
+  const hasPrev = stack.length > 0;
+  const pageNum = stack.length + 1;
+  const rowBase = (pageNum - 1) * PAGE_SIZE;
 
-  const exportCsv = () => {
+  // Reset to the first page whenever server-side filters change (not agent search,
+  // which is client-side over the current page).
+  useEffect(() => { setCursor(undefined); setStack([]); }, [team, flaggedOnly, failedOnly, from, to]);
+
+  const goNext = () => {
+    if (!pageData?.nextCursor) return;
+    setStack((s) => [...s, cursor]);
+    setCursor(pageData.nextCursor);
+  };
+  const goPrev = () => {
+    if (!stack.length) return;
+    const prev = stack[stack.length - 1];
+    setStack(stack.slice(0, -1));
+    setCursor(prev);
+  };
+
+  // CSV export pulls the full matching set on demand (follows the cursor),
+  // independent of the 25/page table view. Excludes skipped (API default).
+  const exportCsv = async () => {
+    const all = await fetchAudits(filters);
     const rows = [
       ["audit_id", "agent", "team", "campaign", "customer", "call_datetime", "status", "score", "flagged", "flag_reason"],
-      ...filtered.map((a) => [
+      ...all.map((a) => [
         a.audit_id,
         agentName(a.agent_id),
         a.team ?? "",
@@ -169,7 +194,7 @@ export function CallAuditsView({ user, users }: { user: User; users: User[] }) {
             )}
             {!isLoading && pageItems.map((a, i) => (
               <tr key={a.audit_id} onClick={() => setSelected(a)} className="border-b border-border last:border-0 cursor-pointer hover:bg-surface-2 transition-colors duration-100">
-                <td className="px-3 py-3 font-mono text-xs text-muted-foreground">{(current - 1) * PAGE_SIZE + i + 1}</td>
+                <td className="px-3 py-3 font-mono text-xs text-muted-foreground">{rowBase + i + 1}</td>
                 <td className="px-3 py-3">
                   <div className="text-foreground">{agentName(a.agent_id)}</div>
                   <div className="font-mono text-[10px] text-muted-foreground">{a.agent_id}</div>
@@ -190,22 +215,22 @@ export function CallAuditsView({ user, users }: { user: User; users: User[] }) {
                 </td>
               </tr>
             ))}
-            {!isLoading && filtered.length === 0 && (
+            {!isLoading && pageItems.length === 0 && (
               <tr><td colSpan={8} className="px-3 py-12 text-center font-mono text-xs text-muted-foreground">No audits match the current filters.</td></tr>
             )}
           </tbody>
         </table>
       </div>
 
-      {!isLoading && filtered.length > 0 && (
+      {!isLoading && (pageItems.length > 0 || hasPrev) && (
         <div className="flex items-center justify-between mt-3 font-mono text-xs text-muted-foreground">
           <span>
-            {(current - 1) * PAGE_SIZE + 1}–{Math.min(current * PAGE_SIZE, filtered.length)} of {filtered.length}
+            {pageItems.length > 0 ? `${rowBase + 1}–${rowBase + pageItems.length}` : "—"}
           </span>
           <div className="flex items-center gap-2">
-            <Button variant="ghost" size="sm" className="h-7 border border-border disabled:opacity-40" disabled={current <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>Prev</Button>
-            <span>Page {current} / {pageCount}</span>
-            <Button variant="ghost" size="sm" className="h-7 border border-border disabled:opacity-40" disabled={current >= pageCount} onClick={() => setPage((p) => Math.min(pageCount, p + 1))}>Next</Button>
+            <Button variant="ghost" size="sm" className="h-7 border border-border disabled:opacity-40" disabled={!hasPrev} onClick={goPrev}>Prev</Button>
+            <span>Page {pageNum}</span>
+            <Button variant="ghost" size="sm" className="h-7 border border-border disabled:opacity-40" disabled={!hasNext} onClick={goNext}>Next</Button>
           </div>
         </div>
       )}

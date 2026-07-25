@@ -76,6 +76,7 @@ export function AuditPromptsView({ user }: { user: User }) {
         scale_max: rubric.scale_max,
         flag_threshold: rubric.flag_threshold,
         critical_criterion_threshold: rubric.critical_criterion_threshold,
+        daily_audit_cap: rubric.daily_audit_cap,
       };
       if (isSuper) { patch.infra = rubric.infra; patch.active = rubric.active; } // infra is super_admin-only server-side
       return updateTeam(rubric.team_id, patch);
@@ -184,6 +185,20 @@ export function AuditPromptsView({ user }: { user: User }) {
                 <label className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">Critical criterion (&lt;)</label>
                 <Input type="number" value={draft.critical_criterion_threshold} disabled={!editable} onChange={(e) => setDraft({ ...draft, critical_criterion_threshold: Number(e.target.value) })} className="mt-1 bg-surface border-border font-mono w-28" />
               </div>
+            </div>
+
+            <div>
+              <label className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">Calls audited per member / day</label>
+              <Input
+                type="number"
+                min={0}
+                step={1}
+                value={draft.daily_audit_cap ?? 0}
+                disabled={!editable}
+                onChange={(e) => setDraft({ ...draft, daily_audit_cap: Math.max(0, Math.floor(Number(e.target.value))) || 0 })}
+                className="mt-1 bg-surface border-border font-mono w-28"
+              />
+              <p className="font-mono text-[10px] text-muted-foreground/70 mt-1">Max calls audited per agent each day for this team. 0 = unlimited. Extras are skipped before transcription.</p>
             </div>
 
             <div>
