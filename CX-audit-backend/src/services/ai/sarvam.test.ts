@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { __internal } from "./sarvam.js";
+import { __internal, extractRoleAnswer } from "./sarvam.js";
 
 const { toTurns, renderTranscript, heuristicRoles, talkTimeBySpeaker, classify } = __internal;
 
@@ -115,6 +115,46 @@ describe("heuristicRoles", () => {
     const r = heuristicRoles([t("0", 0), t("0", 1)]);
     expect(r.agent).toBe("0");
     expect(r.customer).toBeNull();
+  });
+});
+
+describe("extractRoleAnswer", () => {
+  it("reads the flat shape we ask for", () => {
+    expect(
+      extractRoleAnswer({ agent_speaker_id: "0", customer_speaker_id: "1", confidence: 0.9 })
+    ).toEqual({ agent: "0", customer: "1", confidence: 0.9 });
+  });
+
+  it("reads the nested shape sarvam-105b actually returns", () => {
+    // Observed live: the model ignores the requested key names and answers with
+    // {agent:{id,confidence,evidence}}. Rejecting that threw away a correct,
+    // confidence-1.0 answer and fell back to a weak greeting heuristic.
+    expect(
+      extractRoleAnswer({
+        agent: { id: 0, confidence: 1.0, evidence: "Thank you for calling…" },
+        customer: { id: 1, confidence: 1.0, evidence: "I bought a coat…" },
+      })
+    ).toEqual({ agent: "0", customer: "1", confidence: 1 });
+  });
+
+  it("coerces numeric ids to strings so they match diarization ids", () => {
+    expect(extractRoleAnswer({ agent_speaker_id: 0, customer_speaker_id: 1 }).agent).toBe("0");
+  });
+
+  it("accepts the *_id spelling and bare scalars", () => {
+    expect(extractRoleAnswer({ agent_id: "2", customer_id: "3" }).agent).toBe("2");
+    expect(extractRoleAnswer({ agent: "0", customer: "1" }).customer).toBe("1");
+  });
+
+  it("clamps confidence into 0..1 and defaults it to 0", () => {
+    expect(extractRoleAnswer({ agent: "0", confidence: 7 }).confidence).toBe(1);
+    expect(extractRoleAnswer({ agent: "0", confidence: -3 }).confidence).toBe(0);
+    expect(extractRoleAnswer({ agent: "0" }).confidence).toBe(0);
+  });
+
+  it("returns nulls for junk rather than inventing an answer", () => {
+    expect(extractRoleAnswer(null)).toEqual({ agent: null, customer: null, confidence: 0 });
+    expect(extractRoleAnswer({ something_else: true }).agent).toBeNull();
   });
 });
 

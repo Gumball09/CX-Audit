@@ -3,7 +3,7 @@ import { env } from "../../env.js";
 import { logger } from "../../logger.js";
 import { normalizeWeights } from "../../validation.js";
 import { collapseRepetitions } from "../../lib/transcript.js";
-import { splitAudioOnSilence, probeBufferDurationSec } from "../../lib/audio.js";
+import { splitAudioOnSilence, probeBufferDurationSec, normalizeForAsr } from "../../lib/audio.js";
 import type { CriterionScore, Feedback } from "../../types.js";
 import type {
   AuditResult,
@@ -92,19 +92,48 @@ async function api<T>(path: string, init: { method: "GET" | "POST"; body?: unkno
 
 interface SignedUrl {
   file_url: string;
-  file_metadata?: Record<string, unknown>;
+  file_metadata?: Record<string, unknown> | null;
 }
 interface InitResponse {
   job_id: string;
   job_state: string;
 }
+/**
+ * The live API returns `upload_urls` / `download_urls` as an OBJECT keyed by file
+ * name, not the array the published OpenAPI schema implies. Accept either: being
+ * keyed by name is actually the better contract (no positional assumption), but
+ * the docs were wrong once here, so don't bet the pipeline on the shape.
+ */
+type SignedUrlSet = Record<string, SignedUrl> | SignedUrl[];
 interface UploadResponse {
   job_id: string;
-  upload_urls: SignedUrl[];
+  upload_urls?: SignedUrlSet;
+  storage_container_type?: string;
 }
 interface DownloadResponse {
   job_id: string;
-  download_urls: SignedUrl[];
+  download_urls?: SignedUrlSet;
+  storage_container_type?: string;
+}
+
+/** Resolve a signed URL for `fileName`, tolerating both response shapes. */
+function signedUrlFor(set: SignedUrlSet | undefined, fileName: string, index: number): string | null {
+  if (!set) return null;
+  if (Array.isArray(set)) return set[index]?.file_url ?? null;
+  return set[fileName]?.file_url ?? null;
+}
+
+/**
+ * Sarvam stages batch audio in Azure Blob Storage and hands back SAS URLs. Azure
+ * rejects a bare PUT to a block-blob SAS URL with 400 unless this header is
+ * present, so it is required rather than optional.
+ */
+function blobUploadHeaders(url: string): Record<string, string> {
+  const azure = url.includes("blob.core.windows.net");
+  return {
+    "Content-Type": "application/octet-stream",
+    ...(azure ? { "x-ms-blob-type": "BlockBlob" } : {}),
+  };
 }
 interface TaskFile {
   file_name: string;
@@ -165,23 +194,23 @@ async function uploadParts(jobId: string, parts: { fileName: string; buffer: Buf
     method: "POST",
     body: { job_id: jobId, files: parts.map((p) => p.fileName) },
   });
-  const urls = res.upload_urls ?? [];
-  if (urls.length !== parts.length) {
-    throw new SarvamError(
-      `Sarvam returned ${urls.length} upload URL(s) for ${parts.length} file(s)`,
-      500,
-      false
-    );
-  }
-  // Presigned URLs are order-matched to the requested file names.
   for (let i = 0; i < parts.length; i++) {
-    const put = await fetch(urls[i].file_url, {
+    const { fileName, buffer } = parts[i];
+    const url = signedUrlFor(res.upload_urls, fileName, i);
+    if (!url) {
+      throw new SarvamError(
+        `Sarvam returned no upload URL for "${fileName}" (job ${jobId})`,
+        500,
+        false
+      );
+    }
+    const put = await fetch(url, {
       method: "PUT",
-      body: new Uint8Array(parts[i].buffer),
-      headers: { "Content-Type": "application/octet-stream" },
+      body: new Uint8Array(buffer),
+      headers: blobUploadHeaders(url),
     });
     if (!put.ok) {
-      throw classify(put.status, `upload of ${parts[i].fileName} failed: ${await put.text().catch(() => "")}`);
+      throw classify(put.status, `upload of ${fileName} failed: ${await put.text().catch(() => "")}`);
     }
   }
 }
@@ -236,9 +265,14 @@ async function downloadResults(jobId: string, status: StatusResponse): Promise<S
   });
 
   const docs: SarvamTranscript[] = [];
-  for (const u of res.download_urls ?? []) {
-    const got = await fetch(u.file_url);
-    if (!got.ok) throw classify(got.status, `download failed for job ${jobId}`);
+  for (let i = 0; i < outputs.length; i++) {
+    const name = outputs[i];
+    const url = signedUrlFor(res.download_urls, name, i);
+    if (!url) {
+      throw new SarvamError(`Sarvam returned no download URL for "${name}" (job ${jobId})`, 500, false);
+    }
+    const got = await fetch(url);
+    if (!got.ok) throw classify(got.status, `download of ${name} failed for job ${jobId}`);
     docs.push((await got.json()) as SarvamTranscript);
   }
   return docs;
@@ -297,21 +331,55 @@ function heuristicRoles(turns: TranscriptTurn[]): SpeakerRoles {
   return { agent: first, customer: other, confidence: 0.4, method: "heuristic" };
 }
 
-const ROLE_SCHEMA = {
-  name: "speaker_roles",
-  strict: true,
-  schema: {
-    type: "object",
-    additionalProperties: false,
-    properties: {
-      agent_speaker_id: { type: "string" },
-      customer_speaker_id: { type: "string" },
-      confidence: { type: "number" },
-      evidence: { type: "string" },
-    },
-    required: ["agent_speaker_id", "customer_speaker_id", "confidence", "evidence"],
-  },
-} as const;
+/** Coerce whatever the model used to identify a speaker into an id string. */
+function pickSpeakerId(v: unknown): string | null {
+  if (v == null) return null;
+  if (typeof v === "string" || typeof v === "number") return String(v);
+  if (typeof v === "object") {
+    const o = v as Record<string, unknown>;
+    for (const k of ["id", "speaker_id", "speaker", "speakerId"]) {
+      if (o[k] != null) return String(o[k]);
+    }
+  }
+  return null;
+}
+
+function firstNumber(...vals: unknown[]): number | null {
+  for (const v of vals) {
+    const n = Number(v);
+    if (Number.isFinite(n)) return n;
+  }
+  return null;
+}
+
+/**
+ * Pull the role answer out of whatever shape the model chose.
+ *
+ * We ask for flat `agent_speaker_id` / `customer_speaker_id` keys, but sarvam-105b
+ * frequently answers with a nested `{agent: {id, confidence, evidence}}` instead —
+ * the right answer in a different shape. Strict `json_schema` would normally pin
+ * this down, but it is broken on this model (it emits the schema's own keys as
+ * values), so the parser has to absorb the variation instead of rejecting it.
+ * Rejecting it meant silently falling back to a weak greeting heuristic and
+ * throwing away a confident, correct answer.
+ */
+export function extractRoleAnswer(parsed: any): {
+  agent: string | null;
+  customer: string | null;
+  confidence: number;
+} {
+  const agent =
+    pickSpeakerId(parsed?.agent_speaker_id) ??
+    pickSpeakerId(parsed?.agent_id) ??
+    pickSpeakerId(parsed?.agent);
+  const customer =
+    pickSpeakerId(parsed?.customer_speaker_id) ??
+    pickSpeakerId(parsed?.customer_id) ??
+    pickSpeakerId(parsed?.customer);
+  const confidence =
+    firstNumber(parsed?.confidence, parsed?.agent?.confidence, parsed?.customer?.confidence) ?? 0;
+  return { agent, customer, confidence: Math.max(0, Math.min(1, confidence)) };
+}
 
 /**
  * Decide which diarization speaker id is the agent.
@@ -340,10 +408,16 @@ async function resolveRoles(turns: TranscriptTurn[], auditId: string): Promise<S
       model: env.SARVAM_AUDIT_MODEL,
       max_tokens: 500,
       temperature: 0,
-      // Reasoning is on by default on sarvam-105b and its tokens count against
-      // max_tokens; this is a classification task that does not need it.
+      // reasoning_effort:null is REQUIRED, not an optimisation. Reasoning is on by
+      // default on sarvam-105b and its tokens are spent before any content is
+      // emitted, so without this the response comes back with finish_reason
+      // "length", an empty `content`, and the entire answer stranded in
+      // `reasoning_content`.
       ...({ reasoning_effort: null } as Record<string, unknown>),
-      response_format: { type: "json_schema", json_schema: ROLE_SCHEMA } as never,
+      // json_object, NOT json_schema. Strict structured output is broken on
+      // sarvam-105b: it emits the schema's own keys as values and then pads
+      // newlines until it hits max_tokens. json_object returns clean JSON.
+      response_format: { type: "json_object" },
       messages: [
         {
           role: "system",
@@ -357,20 +431,27 @@ async function resolveRoles(turns: TranscriptTurn[], auditId: string): Promise<S
             `Speaker ids present: ${ids.join(", ")}.\n\n` +
             `Opening of the call:\n${opening}\n\n` +
             `Which speaker id is the agent and which is the customer? ` +
-            `Set confidence between 0 and 1, and quote the line that decided it as evidence.`,
+            `Set confidence between 0 and 1, and quote the line that decided it as evidence.\n` +
+            // Spelled out because this model drifts to a nested {agent:{id:…}}
+            // shape otherwise. The parser tolerates that, but asking for the flat
+            // shape keeps the common case clean.
+            `Reply with exactly this flat JSON shape:\n` +
+            `{"agent_speaker_id": "<id>", "customer_speaker_id": "<id>", "confidence": 0.0, "evidence": "<quoted line>"}`,
         },
       ],
     });
 
-    const parsed = parseJson(res.choices[0]?.message?.content ?? "");
-    const agent = parsed?.agent_speaker_id != null ? String(parsed.agent_speaker_id) : null;
-    const customer = parsed?.customer_speaker_id != null ? String(parsed.customer_speaker_id) : null;
-    const confidence = Math.max(0, Math.min(1, Number(parsed?.confidence ?? 0)));
+    const content = res.choices[0]?.message?.content ?? "";
+    const { agent, customer, confidence } = extractRoleAnswer(parseJson(content));
 
     // Only trust ids the diarizer actually produced, and reject the model
     // labelling one speaker as both roles.
     if (!agent || !ids.includes(agent) || agent === customer) {
-      logger.warn(`Role mapping for ${auditId} returned an unusable answer; falling back to heuristics`);
+      logger.warn(
+        `Role mapping for ${auditId} returned an unusable answer ` +
+          `(finish=${res.choices[0]?.finish_reason}, content=${JSON.stringify(content).slice(0, 200)}); ` +
+          `falling back to heuristics`
+      );
       return heuristicRoles(turns);
     }
 
@@ -443,6 +524,13 @@ export async function transcribeCall(
     logger.warn("SARVAM_API_KEY not set — returning stub transcription");
     return stubTranscription(fileName);
   }
+
+  // Normalise to 16 kHz mono before anything else. Sarvam silently mis-decodes
+  // unexpected sample rates — a 48 kHz file returned timestamps ~2.85x too long
+  // and phonetic nonsense, with no error at all. See normalizeForAsr.
+  const normalised = await normalizeForAsr(buffer, fileName);
+  buffer = normalised.buffer;
+  fileName = normalised.fileName;
 
   // Batch accepts up to 2 hours per file. Longer recordings are split on silence
   // and submitted as multiple files in the same job, then stitched back together.
