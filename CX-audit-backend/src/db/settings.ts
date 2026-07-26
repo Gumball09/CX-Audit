@@ -17,27 +17,46 @@ export interface ModelSettings {
 }
 
 /**
- * Read the settings row, filling any missing value from the provider's defaults.
+ * Resolve a stored settings row into effective settings.
  *
- * The model fallbacks are deliberately provider-scoped: model ids are not
- * portable, so defaulting to an OpenAI id while Sarvam is active would send
- * `gpt-4o` to api.sarvam.ai and fail every audit.
+ * Pure and exported so the migration rule below can be tested directly — it is
+ * the kind of thing that is easy to get wrong once and then never notice.
+ *
+ * The model fallbacks are provider-scoped, because model ids are not portable
+ * between providers. The subtle case is a row written **before** `ai_provider`
+ * existed: it holds OpenAI model ids and says nothing about the provider, so
+ * resolving the provider to the Sarvam default while keeping `gpt-4o` would send
+ * an OpenAI model name to api.sarvam.ai and fail every audit. A row with no
+ * `ai_provider` is therefore treated as OpenAI-era: its model ids are honoured
+ * only if the effective provider is still OpenAI, and otherwise discarded in
+ * favour of the active provider's defaults.
  */
-export async function getSettings(): Promise<PlatformSettings> {
-  const res = await ddb.send(new GetCommand({ TableName: TABLE, Key: { setting_id: SINGLETON } }));
-  const item = res.Item as PlatformSettings | undefined;
-  const provider = isProvider(item?.ai_provider) ? item.ai_provider : DEFAULT_PROVIDER;
+export function resolveSettings(
+  item: Partial<PlatformSettings> | undefined,
+  defaultProvider: AiProvider = DEFAULT_PROVIDER
+): PlatformSettings {
+  const declared = isProvider(item?.ai_provider);
+  const provider = declared ? (item!.ai_provider as AiProvider) : defaultProvider;
   const fallback = defaultModels(provider);
+  // Stored model ids are only trustworthy if we know which provider they were
+  // written for — either the row says so, or the provider hasn't changed since.
+  const trustStored = declared || provider === "openai";
   return {
     setting_id: SINGLETON,
     ai_provider: provider,
-    transcription_model: item?.transcription_model || fallback.transcription,
-    audit_model: item?.audit_model || fallback.audit,
+    transcription_model: (trustStored && item?.transcription_model) || fallback.transcription,
+    audit_model: (trustStored && item?.audit_model) || fallback.audit,
     min_audit_duration_sec:
       item?.min_audit_duration_sec != null ? item.min_audit_duration_sec : env.MIN_CALL_DURATION_SECONDS,
     updated_at: item?.updated_at ?? "",
     updated_by: item?.updated_by ?? null,
   };
+}
+
+/** Read the settings row, filling any missing value from the provider's defaults. */
+export async function getSettings(): Promise<PlatformSettings> {
+  const res = await ddb.send(new GetCommand({ TableName: TABLE, Key: { setting_id: SINGLETON } }));
+  return resolveSettings(res.Item as PlatformSettings | undefined);
 }
 
 let cache: { at: number; val: ModelSettings } | null = null;
