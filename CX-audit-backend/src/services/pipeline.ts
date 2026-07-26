@@ -12,7 +12,8 @@ import { probeBufferDurationSec } from "../lib/audio.js";
 import { transcribeAudio, auditTranscript } from "./openai.js";
 import { getUserByAgentId } from "../db/users.js";
 import { getTeam } from "../db/teams.js";
-import { createAuditIfAbsent, getAudit, updateAudit, setStatus, getStatusCounts } from "../db/audits.js";
+import { createAuditIfAbsent, getAudit, updateAudit, setStatus } from "../db/audits.js";
+import { reserveDailySlot, releaseDailySlot } from "../db/quota.js";
 import { listRubricsByTeam } from "../db/rubrics.js";
 import { recordAuditPerformance } from "../db/performance.js";
 import { getModelSettingsCached } from "../db/settings.js";
@@ -42,9 +43,6 @@ export async function processTranscription(recordingKey: string, queueTeamId: st
   // teams on the global queue.
   const agentUser = await getUserByAgentId(meta.agent_id);
   const team = queueTeamId ?? agentUser?.team ?? null;
-  if (!team) {
-    logger.warn(`No team mapping for agent ${meta.agent_id} (audit ${auditId})`);
-  }
   const infra = await resolveTeamInfra(queueTeamId);
 
   const now = new Date().toISOString();
@@ -92,36 +90,60 @@ export async function processTranscription(recordingKey: string, queueTeamId: st
     return;
   }
 
-  // Gate 2 — per-agent daily audit cap (per-team, admin-set). Count this agent's
-  // calls already committed past this gate on the call's date (transcribed /
-  // auditing / audited — the current call is still `transcribing`, so it's
-  // excluded); skip once the cap is reached. Best-effort under concurrency: a
-  // few messages for the same agent/day can slip past together.
-  if (team) {
-    const teamRow = await getTeam(team);
-    const cap = teamRow?.daily_audit_cap ?? 0;
-    if (cap > 0) {
-      const day = meta.call_datetime.slice(0, 10); // YYYY-MM-DD
-      const counts = await getStatusCounts(
-        { kind: "agent", agentId: meta.agent_id },
-        { from: `${day}T00:00:00.000Z`, to: `${day}T23:59:59.999Z` }
-      );
-      const committed = (counts.transcribed ?? 0) + (counts.auditing ?? 0) + (counts.audited ?? 0);
-      if (committed >= cap) {
-        await updateAudit(auditId, {
-          status: "skipped",
-          skip_reason: "daily_cap",
-          duration_sec: durationSec > 0 ? Math.round(durationSec) : undefined,
-        });
-        logger.info(`Skipping ${auditId} — daily cap reached for agent ${meta.agent_id} (${committed}/${cap} on ${day})`);
-        return;
-      }
+  // Gate 2 — team mapping. Without a team there is no rubric, so the audit can
+  // never complete: transcribing it would spend money on a call that is
+  // guaranteed to fail at stage 2. Skip before that spend. This is recoverable —
+  // `skipped` stays re-processable, so mapping the agent and reprocessing picks
+  // the call back up. It also has to run BEFORE the cap gate, because the cap is
+  // keyed on the team and would otherwise be bypassed entirely for these calls.
+  if (!team) {
+    await updateAudit(auditId, {
+      status: "skipped",
+      skip_reason: "no_team",
+      duration_sec: durationSec > 0 ? Math.round(durationSec) : undefined,
+    });
+    logger.warn(
+      `Skipping ${auditId} — no team mapping for agent ${meta.agent_id}; map the agent and reprocess to audit it`
+    );
+    return;
+  }
+
+  // Gate 3 — per-agent daily audit cap (per-team, admin-set). `reserveDailySlot`
+  // claims a slot with a single conditional write, so concurrent messages for the
+  // same agent/day cannot exceed the cap. The reservation is keyed on `audit_id`,
+  // making a redelivery of the same recording reuse its slot rather than consume
+  // a second one.
+  const teamRow = await getTeam(team);
+  const cap = teamRow?.daily_audit_cap ?? 0;
+  const day = meta.call_datetime.slice(0, 10); // YYYY-MM-DD (the call's date)
+  let reserved = false;
+  if (cap > 0) {
+    const slot = await reserveDailySlot(meta.agent_id, day, cap, auditId);
+    if (!slot.granted) {
+      await updateAudit(auditId, {
+        status: "skipped",
+        skip_reason: "daily_cap",
+        duration_sec: durationSec > 0 ? Math.round(durationSec) : undefined,
+      });
+      logger.info(`Skipping ${auditId} — daily cap reached for agent ${meta.agent_id} (${slot.used}/${cap} on ${day})`);
+      return;
     }
+    reserved = true;
   }
 
   const { transcription_model } = settings;
-  const transcript = await transcribeAudio(buffer, meta.file_name, transcription_model);
-  const transcriptionKey = await saveTranscription(transcript, auditId, infra.output_bucket);
+  let transcript: string;
+  let transcriptionKey: string;
+  try {
+    transcript = await transcribeAudio(buffer, meta.file_name, transcription_model);
+    transcriptionKey = await saveTranscription(transcript, auditId, infra.output_bucket);
+  } catch (err) {
+    // Hand the slot back so a permanently broken recording doesn't hold one of
+    // the agent's daily slots. A redelivery re-claims it (idempotently, by
+    // audit_id), so a transient failure still only ever consumes one.
+    if (reserved) await releaseDailySlot(meta.agent_id, day, auditId);
+    throw err;
+  }
 
   await updateAudit(auditId, {
     status: "transcribed",

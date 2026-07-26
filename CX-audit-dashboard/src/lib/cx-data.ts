@@ -168,7 +168,7 @@ export interface Audit {
   team: Team | null;
   duration_sec?: number;
   status: AuditStatus;
-  skip_reason?: "too_short" | "daily_cap";
+  skip_reason?: "too_short" | "daily_cap" | "no_team";
   error?: string;
   transcription_key?: string;
   transcription_url?: string;

@@ -123,6 +123,10 @@ export const env = {
   DDB_SUGGESTIONS_TABLE: getEnv("DDB_SUGGESTIONS_TABLE", false, "cx_suggestions"),
   // Per-role daily/monthly sign-in counters (the DAU/MAU dashboard).
   DDB_LOGIN_STATS_TABLE: getEnv("DDB_LOGIN_STATS_TABLE", false, "cx_login_stats"),
+  // Per-agent, per-day audit slot counters backing the team `daily_audit_cap`.
+  // Rows are claimed with a conditional write so concurrent workers cannot
+  // overshoot the cap, and expire via TTL a week after the call's date.
+  DDB_QUOTA_TABLE: getEnv("DDB_QUOTA_TABLE", false, "cx_audit_quota"),
 };
 
 /**

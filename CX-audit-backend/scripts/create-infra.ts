@@ -11,6 +11,8 @@
 import {
   DynamoDBClient,
   CreateTableCommand,
+  DescribeTimeToLiveCommand,
+  UpdateTimeToLiveCommand,
   type CreateTableCommandInput,
 } from "@aws-sdk/client-dynamodb";
 import {
@@ -200,7 +202,22 @@ const tables: CreateTableCommandInput[] = [
       { AttributeName: "bucket", KeyType: "RANGE" },
     ],
   },
+  {
+    // Per-agent, per-day audit slot counters backing the team `daily_audit_cap`.
+    // Key is `<agent_id>#<YYYY-MM-DD>`; slots are claimed with a conditional
+    // write so concurrent workers can't overshoot the cap. Rows self-expire via
+    // the `expires_at` TTL a week after the call's date.
+    TableName: env.DDB_QUOTA_TABLE,
+    BillingMode: PAY,
+    AttributeDefinitions: [{ AttributeName: "quota_id", AttributeType: S }],
+    KeySchema: [{ AttributeName: "quota_id", KeyType: "HASH" }],
+  },
 ];
+
+/** Tables whose rows self-expire, mapped to their TTL attribute. */
+const ttlAttributes: Record<string, string> = {
+  [env.DDB_QUOTA_TABLE]: "expires_at",
+};
 
 async function createTables() {
   for (const table of tables) {
@@ -210,6 +227,31 @@ async function createTables() {
     } catch (err: any) {
       if (err.name === "ResourceInUseException") console.log(`• table ${table.TableName} already exists`);
       else throw err;
+    }
+  }
+  await enableTtls();
+}
+
+/** Turn on TTL for tables that self-expire. Idempotent and safe to re-run. */
+async function enableTtls() {
+  for (const [tableName, attributeName] of Object.entries(ttlAttributes)) {
+    try {
+      const current = await ddb.send(new DescribeTimeToLiveCommand({ TableName: tableName }));
+      const status = current.TimeToLiveDescription?.TimeToLiveStatus;
+      if (status === "ENABLED" || status === "ENABLING") {
+        console.log(`• TTL already enabled on ${tableName}`);
+        continue;
+      }
+      await ddb.send(
+        new UpdateTimeToLiveCommand({
+          TableName: tableName,
+          TimeToLiveSpecification: { Enabled: true, AttributeName: attributeName },
+        })
+      );
+      console.log(`✓ enabled TTL on ${tableName} (${attributeName})`);
+    } catch (err: any) {
+      // A brand-new table can still be CREATING; TTL can be enabled later.
+      console.log(`! could not enable TTL on ${tableName}: ${err.name ?? err.message}. Re-run once the table is ACTIVE.`);
     }
   }
 }

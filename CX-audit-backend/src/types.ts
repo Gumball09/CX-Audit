@@ -202,10 +202,12 @@ export interface AuditRecord {
   duration_sec?: number;     // recording length in seconds (probed at transcription)
 
   status: AuditStatus;
-  // When status is "skipped", why: too short (< min audit duration) or the
-  // agent's daily audit cap was already reached. Distinguishes the two skip
-  // causes for reporting (both are hidden from the logs view).
-  skip_reason?: "too_short" | "daily_cap";
+  // When status is "skipped", why: too short (< min audit duration), the agent's
+  // daily audit cap was already reached, or the agent has no team mapping so no
+  // rubric can be selected. Distinguishes the skip causes for reporting (all are
+  // hidden from the logs view). `no_team` is recoverable — map the agent and
+  // reprocess.
+  skip_reason?: "too_short" | "daily_cap" | "no_team";
   error?: string;
 
   transcription_key?: string;
