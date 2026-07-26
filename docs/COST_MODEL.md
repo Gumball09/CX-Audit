@@ -61,30 +61,49 @@ calls per agent per day against the real per-agent, per-day call pattern.
 **Scale: 10 auditable agents** — 6 RM, 3 CS, 1 Escalations. The other 8 rows in
 `cx_users` are admins and super-admins, who are never audited.
 
-| `min_audit_duration_sec` | calls/day audited | avg length | ₹/day | **₹/22-day month** |
-|---|---|---|---|---|
-| 0 | 15.4 | 211s | 41 | **893** |
-| 60 | 15.4 | 415s | 80 | **1,756** |
-| 120 | 15.4 | 488s | 94 | **2,062** |
-| 300 | 15.3 | 657s | 126 | **2,769** |
-| 600 (current default) | 12.6 | 987s | 156 | **3,425** |
-| 900 | 7.9 | 1371s | 135 | 2,968 |
+Billing runs on **calendar** days, not working days: the team works weekends, and
+Saturday 20 June was the busiest day in the window (680 calls). So the month is 30
+days, not 22.
 
-**₹900–₹3,400/month, about $11–$41.** Against a stated budget of $350–400 that is
-roughly 10× of headroom. At this scale cost is not the binding constraint — the
-daily cap already made it small.
+| `min_audit_duration_sec` | cleared the gate | audited (cap 3) | audio-hrs | ₹/day | **₹/30-day month** |
+|---|---|---|---|---|---|
+| 0 | 3,678 | 246 | 14.4 | 41 | **1,217** |
+| 120 | 1,472 | 246 | 33.3 | 94 | **2,811** |
+| 300 | 803 | 245 | 44.7 | 126 | **3,775** |
+| 600 (current default) | 330 | 202 | 55.4 | 156 | **4,671** |
+
+"Cleared the gate" and "audited" are over the whole 16-day window; ₹/day divides the
+window cost by 16 calendar days. Plus ~₹7/month for the role-mapping and scoring
+chat calls, which is not worth tracking.
+
+**₹1,217–₹4,671/month, about $15–$56.** Against a stated budget of $350–400 that is
+roughly 7× of headroom. At this scale cost is not the binding constraint — the daily
+cap already made it small.
+
+### Worked example — one agent, one real day
+
+Agent `460015` on 2026-06-17, at a 300s threshold:
+
+- **58 calls** handled
+- **8** clear the duration gate (the rest ran 7s–282s)
+- **3** get cap slots: 443s → ₹5.54, 382s → ₹4.78, 419s → ₹5.24
+- **1,244s = 0.346 hr → ₹15.55** for that agent, that day
+
+Five calls cleared the gate and were dropped by the cap. ₹15.55 × 10 agents × 30
+days ≈ ₹4,700, which is the top of the range above.
 
 ### Raising the duration threshold costs MORE, not less
 
 This is counter-intuitive and worth stating plainly, because the opposite was
-assumed for a long time. Between 0 and 300 seconds the **cap binds** at ~15 calls a
-day regardless of the threshold. So the threshold does not change how many calls are
+assumed for a long time. Between 0 and 300 seconds the **cap binds** at ~246 audits per 16-day
+window regardless of the threshold, even as calls clearing the gate collapse 11x
+(3,678 -> 330). So the threshold does not change how many calls are
 audited — it only changes *which three* per agent get picked, and a higher threshold
-forces the selection toward longer, more expensive calls. Moving 300s → 600s
-increases spend by ~24% while auditing *fewer* calls.
+forces the selection toward longer, more expensive calls. Audio-hours climb 14.4 -> 55.4, nearly 4x, for slightly *fewer* audits, which makes
+the 600s default the most expensive setting available.
 
 Set `min_audit_duration_sec` on whether a call is long enough to be worth reviewing.
-It is not a cost lever, and the ₹893 row is not a target — a 30-second call has
+It is not a cost lever, and the ₹1,217 row is not a target — a 30-second call has
 nothing to assess.
 
 ### Where the money was actually going
@@ -101,7 +120,7 @@ The fundamentals were never expensive. The waste was:
 - No per-agent cap was enforced at the time.
 
 Mapping those 8 agents takes the auditable population from 10 to 18 and roughly
-doubles spend, to ~₹1,600–₹6,200/month — still well inside budget, and it is the
+doubles spend, to ~₹2,200–₹8,400/month — still well inside budget, and it is the
 change that actually improves coverage. Today ~15 of ~230 auditable calls per day
 are audited, about 7%.
 
@@ -145,7 +164,7 @@ In descending order of effect, measured against production data rather than assu
 1. **Daily audit cap** — 3 calls per agent per day (per-team, admin-set). This is
    the lever, and it is already doing the work: it makes spend a function of
    headcount (10 auditable agents) rather than call volume (~424 calls/day), which
-   is what brings the bill to ₹900–₹3,400/month. Enforced with an atomic
+   is what brings the bill to ₹1,217–₹4,671/month. Enforced with an atomic
    reservation keyed on `audit_id`, so redeliveries reuse a slot.
 2. **The `no_team` gate.** 46% of all calls and 225 of 433 audio-hours came from 8
    agents with no `cx_users` mapping, which could never be audited because no team
