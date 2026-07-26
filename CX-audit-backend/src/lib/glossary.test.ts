@@ -18,6 +18,16 @@ describe("normalizeTerms", () => {
     }
   });
 
+  it("catches the variants codemix mode produces, not just translit's", () => {
+    // Switching STT mode changed the mis-hearing: translit gave "Eskillo" and
+    // "update@skla.com", codemix gave "Eskilo" (one l) and "update@skilla.com" on
+    // the same audio. The l-count is not stable, so the rule must not assume it.
+    expect(normalizeTerms("this is Shabaz here from Eskilo.").text).toBe(
+      "this is Shabaz here from Scaler."
+    );
+    expect(normalizeTerms("mail update@skilla.com").text).toBe("mail update@scaler.com");
+  });
+
   it("fixes the support address without touching the local part", () => {
     expect(normalizeTerms("update update@skla.com.").text).toBe("update update@scaler.com.");
     expect(normalizeTerms("update@kerala.com that's it right?").text).toBe(
@@ -67,5 +77,21 @@ describe("normalizeTerms", () => {
     expect(normalizeTerms("Ready? blouse piece and walk Yeah").text).toBe(
       "Ready? blouse piece and walk Yeah"
     );
+  });
+});
+
+describe("rule interaction", () => {
+  it("does not corrupt an email whose domain variant is not yet listed", () => {
+    // The company rule would otherwise match the domain fragment and produce
+    // "update@Scaler.com" — wrong case, and bypassing the email rule. Failing to
+    // fix an unknown variant is acceptable; mangling it is not.
+    const r = normalizeTerms("mail update@skillu.com please");
+    expect(r.text).toBe("mail update@skillu.com please");
+  });
+
+  it("reports the email rule, not the company rule, for a known address", () => {
+    const r = normalizeTerms("update@skilla.com");
+    expect(r.text).toBe("update@scaler.com");
+    expect(r.substitutions).toEqual({ "support email domain": 1 });
   });
 });

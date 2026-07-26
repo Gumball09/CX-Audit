@@ -48,20 +48,32 @@ interface TermRule {
  * Add a variant only when you have seen it in a real transcript AND it is not a
  * word that could legitimately appear in a customer conversation.
  */
+/**
+ * ORDER MATTERS. The email rule must run before the company rule, or the company
+ * rule matches the domain fragment inside an address — "update@skilla.com" became
+ * "update@Scaler.com", wrong case and bypassing the email rule entirely. The
+ * company rule additionally refuses to match after an "@" so that a domain variant
+ * not yet enumerated below is left intact rather than half-rewritten. Failing to
+ * fix is fine; corrupting is not.
+ */
 const RULES: TermRule[] = [
   {
-    label: "company name",
-    // Observed: Eskillo, Skillo, SKL. "Escalar" is included as a near-miss of the
-    // Hindi-accented pronunciation. "Scalar" is NOT — see the note above.
-    pattern: /\b(?:e?skillo|skillow|eskiller|escalar|skl)\b/gi,
-    replacement: "Scaler",
+    label: "support email domain",
+    // Enumerated rather than fuzzy on purpose: the customer's own address is
+    // usually a real domain (gmail.com appears in these calls), so a permissive
+    // pattern here would rewrite the customer's email. Only rewrites the domain of
+    // something already shaped like an address, so "Kerala" on its own is untouched.
+    pattern: /\b([A-Za-z0-9._%+-]+)@(?:skla|skilla|skilo|skillo|skiller|kerala|scalar)\.com\b/gi,
+    replacement: "$1@scaler.com",
   },
   {
-    label: "support email domain",
-    // Only rewrites the domain of something already shaped like an address, so
-    // "Kerala" on its own is untouched.
-    pattern: /\b([A-Za-z0-9._%+-]+)@(?:skla|kerala|skiller|skillo|scalar)\.com\b/gi,
-    replacement: "$1@scaler.com",
+    label: "company name",
+    // Observed across modes: Eskillo, Skillo, SKL (translit) and Eskilo (codemix).
+    // The l-count varies between modes, so match one or two rather than
+    // enumerating spellings. "Escalar" is a near-miss of the accented
+    // pronunciation. "Scalar" is NOT — see the note above.
+    pattern: /(?<!@)\b(?:e?skil{1,2}(?:o|ow|a|er)|escalar|skl)\b/gi,
+    replacement: "Scaler",
   },
 ];
 

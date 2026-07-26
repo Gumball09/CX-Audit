@@ -6,32 +6,89 @@ where flagged.
 
 ## Per-call cost, measured
 
+### Published Sarvam rates (as of 2026-07-26)
+
+| Item | Rate |
+|---|---|
+| Speech to Text | **₹30 / audio hour** |
+| Speech to Text **with diarization** | **₹45 / audio hour** |
+| sarvam-105b input | ₹4 / 1M tokens |
+| sarvam-105b cached input | ₹2.5 / 1M tokens |
+| sarvam-105b output | ₹16 / 1M tokens |
+| Free credits on signup | ₹100 |
+
+Billing is per second of audio, rounded up per request. We need diarization — it is
+what separates agent from customer, and the audit prompt scores the agent only — so
+**₹45/hr is our rate**, not ₹30.
+
+Note on cached input: Sarvam publishes a cached-input rate, but the API does not
+report cached tokens (`prompt_tokens_details` came back `null` across three
+identical 1,259-token prompts, with no latency trend). So we cannot verify or rely
+on it. Do not design around it.
+
+### Measured per call
+
 | Component | Measured | Cost |
 |---|---|---|
-| Batch STT with diarization | 356s of audio | **₹4.46** (₹45/hr) |
-| Role-mapping chat call | ~500 prompt tokens | negligible |
-| Audit chat call, per rubric | 1,259 prompt + ~300 completion | **~₹0.08** * |
+| Batch STT with diarization | 356s of audio | **₹4.46** |
+| Role-mapping chat call | ~500 in + ~100 out | ₹0.004 |
+| Audit chat call, per rubric | 1,259 in + ~300 out | **₹0.010** |
 
-\* We do not have a published sarvam-105b token rate. The figure assumes a
-generous ₹50 per million tokens. The conclusion below does not depend on it: for
-the audit call to cost as much as the STT for the same recording, the rate would
-have to be about **₹2,885 per million tokens** — roughly 50× any plausible price
-for a model this size. The ratio is lopsided enough that a large pricing error
-does not change the decision.
+**Audio duration is ~99.7% of the cost of auditing a call. Tokens are ~0.3%.**
 
-**Audio duration is ~98% of the cost of auditing a call. Tokens are ~2%.**
+The audit chat call costs roughly **one paisa**. STT for the same recording is
+~450× that. Any effort spent shaving tokens is effort spent on a rounding error.
+
+## Cost range by call length
+
+At ₹45/hr with diarization, plus ~₹0.015 for the two chat calls:
+
+| Call length | Per call |
+|---|---|
+| 1 min | ₹0.77 |
+| 3 min | ₹2.27 |
+| 5 min | ₹3.77 |
+| 6 min | ₹4.52 |
+| 10 min | ₹7.52 |
+| 15 min | ₹11.27 |
+
+### Monthly, at 3 audited calls per agent per day
+
+Assumes 22 working days and every agent using their full daily cap.
+
+| Avg audited call | Per agent / month | 20 agents | 50 agents | 100 agents |
+|---|---|---|---|---|
+| 3 min | ₹150 | ₹3,000 | ₹7,500 | ₹15,000 |
+| 5 min | ₹249 | ₹4,980 | ₹12,450 | ₹24,900 |
+| 10 min | ₹496 | ₹9,930 | ₹24,825 | ₹49,650 |
+
+Against a stated budget of $350–400/month (roughly ₹29,000–33,000), a 5-minute
+average supports about **120 agents** at three calls each per working day. A
+10-minute average halves that.
+
+Two things follow. The **daily cap** makes spend a function of headcount rather than
+call volume, which is what makes it predictable at all. And **average audited call
+length is the other multiplier** — which is set by `min_audit_duration_sec`, since
+that threshold decides which calls qualify.
+
+### Versus OpenAI
+
+`gpt-4o-mini-transcribe` is about ₹15 per audio hour. Sarvam with diarization is
+₹45 — **roughly 3× more per hour** (2× without diarization, which we can't use).
+The migration buys accuracy on Indian speech and speaker separation. It does not
+save money, and no amount of tuning will change that.
 
 ## What this means for adding rubric `guidance`
 
 Fully specifying all five CS criteria adds roughly 400–500 prompt tokens, taking
-the audit call from ~1,259 to ~1,700 tokens: about **₹0.02 per call**, against
-₹4.46 of transcription for the same call.
+the audit call from ~1,259 to ~1,700 tokens: about **₹0.002 per call** — two tenths
+of a paisa — against ₹4.46 of transcription for the same call.
 
 Set against that, guidance made scoring reproducible where nothing else did —
 criteria with guidance scored identically across three runs, criteria without kept
 swinging (Escalation Handling 80/0/0 → 100/100/100). **Write the guidance as long as
 it needs to be.** Terse guidance to save tokens would trade the thing that fixed
-score reliability for two paise.
+score reliability for two tenths of a paisa.
 
 ## Prompt caching
 
@@ -82,7 +139,7 @@ Only one item, and it is small:
 
 - **Consolidating multi-rubric scoring into one call.** `processAudit` makes one
   chat call per active rubric, each resending the full transcript, so N rubrics
-  means N× the prompt tokens. At ₹0.08 per call even four rubrics come to ₹0.32
+  means N× the prompt tokens. At ₹0.01 per call even four rubrics come to ₹0.04
   against ₹4.46 of STT. Merging them risks one rubric's criteria bleeding into
   another's scores and makes a single failure lose every rubric's result. Not worth
   it for pennies.

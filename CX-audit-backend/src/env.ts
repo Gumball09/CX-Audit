@@ -85,9 +85,18 @@ export const env = {
   // Saaras v3 is the current ASR model; saarika:v2.5 is being deprecated.
   SARVAM_STT_MODEL: getEnv("SARVAM_STT_MODEL", false, "saaras:v3"),
   // transcribe | translate | verbatim | translit | codemix.
-  // "translit" keeps the call exactly as spoken but in Roman script, so a
-  // Hinglish call stays faithful and is still readable by every reviewer.
-  SARVAM_STT_MODE: getEnv("SARVAM_STT_MODE", false, "translit"),
+  // Compared all four modes on the same 8 kHz call (2026-07-26):
+  //   transcribe / verbatim — emit NATIVE script for regional speech (Tamil "இப்போ"
+  //     appeared mid-sentence). Unusable for reviewers who don't read the script,
+  //     even though Sarvam recommends `transcribe` for transcription.
+  //   translit — consistently Roman, but garbled "how may I help you?" into
+  //     "on my LPM" and the spoken email into "three one is a two double one man".
+  //   codemix — recovered both of those correctly and segments turns more finely
+  //     (65 vs 60 on a 6-minute call).
+  // codemix wins on accuracy, with one caveat: it is not strictly Roman-only —
+  // short fillers can still come back in Devanagari ("या या"). Override per
+  // deployment if reviewers need guaranteed Roman script.
+  SARVAM_STT_MODE: getEnv("SARVAM_STT_MODE", false, "codemix"),
   // BCP-47 (hi-IN, en-IN, …) or "unknown" to auto-detect. Our calls mix
   // languages per agent, so auto-detect is the safer default.
   SARVAM_LANGUAGE_CODE: getEnv("SARVAM_LANGUAGE_CODE", false, "unknown"),
