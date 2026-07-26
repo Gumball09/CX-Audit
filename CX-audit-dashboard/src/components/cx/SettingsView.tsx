@@ -32,7 +32,11 @@ export function SettingsView({ user }: { user: User }) {
 
   useEffect(() => {
     if (data) {
-      setProvider(data.ai_provider);
+      // Tolerate an API that predates ai_provider/providers. The dashboard
+      // auto-deploys on merge to main while the backend needs a separate push, so
+      // a new UI against an older API is a real window, not a hypothetical — and
+      // an unrecognised provider here would leave every model list undefined.
+      setProvider(PROVIDER_MODELS[data.ai_provider] ? data.ai_provider : "sarvam");
       setTranscription(data.transcription_model);
       setAudit(data.audit_model);
       setMinMinutes(String((data.min_audit_duration_sec ?? 600) / 60));
@@ -41,8 +45,8 @@ export function SettingsView({ user }: { user: User }) {
 
   const minSec = Math.round(Number(minMinutes) * 60);
   const minValid = minMinutes.trim() !== "" && Number.isFinite(minSec) && minSec >= 0;
-  const switching = !!data && provider !== data.ai_provider;
-  const suggestions = PROVIDER_MODELS[provider];
+  const switching = !!data?.ai_provider && provider !== data.ai_provider;
+  const suggestions = PROVIDER_MODELS[provider] ?? PROVIDER_MODELS.sarvam;
 
   /**
    * Switching provider also swaps the model ids, because model names are not
