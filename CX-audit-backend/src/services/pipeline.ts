@@ -14,6 +14,7 @@ import { getUserByAgentId } from "../db/users.js";
 import { getTeam } from "../db/teams.js";
 import { createAuditIfAbsent, getAudit, updateAudit, setStatus } from "../db/audits.js";
 import { reserveDailySlot, releaseDailySlot } from "../db/quota.js";
+import { recordSkip } from "../db/skipStats.js";
 import { listRubricsByTeam } from "../db/rubrics.js";
 import { recordAuditPerformance } from "../db/performance.js";
 import { getModelSettingsCached } from "../db/settings.js";
@@ -45,39 +46,29 @@ export async function processTranscription(recordingKey: string, queueTeamId: st
   const team = queueTeamId ?? agentUser?.team ?? null;
   const infra = await resolveTeamInfra(queueTeamId);
 
-  const now = new Date().toISOString();
-  const record: AuditRecord = {
-    audit_id: auditId,
-    recording_key: recordingKey,
-    recording_url: s3Url(infra.recording_bucket, recordingKey),
-    agent_id: meta.agent_id,
-    session_id: meta.session_id,
-    campaign: meta.campaign,
-    customer_number: meta.customer_number,
-    call_datetime: meta.call_datetime,
-    team,
-    status: "queued",
-    created_at: now,
-    updated_at: now,
-  };
-
-  const created = await createAuditIfAbsent(record);
-  if (!created) {
-    const existing = await getAudit(auditId);
-    // `skipped` stays re-processable so lowering MIN_CALL_DURATION_SECONDS and
-    // reprocessing can re-evaluate a previously-too-short call.
-    if (existing && existing.status !== "failed" && existing.status !== "queued" && existing.status !== "skipped") {
-      logger.info(`Skipping ${auditId} — already processed (status=${existing.status})`);
-      return;
-    }
-    logger.info(`Re-processing ${auditId} (previous status=${existing?.status})`);
+  // Idempotency read. The conditional create below is what actually serializes
+  // concurrent first-time deliveries; this earlier read just avoids re-downloading
+  // and re-probing a recording that is already done. `failed` and `queued` stay
+  // re-processable.
+  const prior = await getAudit(auditId);
+  if (prior && prior.status !== "failed" && prior.status !== "queued") {
+    logger.info(`Skipping ${auditId} — already processed (status=${prior.status})`);
+    return;
   }
 
-  await setStatus(auditId, "transcribing");
   const buffer = await getRecordingBuffer(recordingKey, infra.recording_bucket);
-
   const durationSec = await probeBufferDurationSec(buffer, meta.file_name);
   const settings = await getModelSettingsCached();
+  const day = meta.call_datetime.slice(0, 10); // YYYY-MM-DD (the call's own date)
+
+  // ---- Gates -------------------------------------------------------------
+  // All three run BEFORE the audit row is created, so a rejected call leaves no
+  // row behind: the logs view stays clean and the table only ever holds calls we
+  // actually spend money on. Each skip bumps a per-day tally instead, so the
+  // volume controls stay measurable without one row per rejected call.
+  //
+  // Nothing below this point has incurred AI cost yet — only an S3 download and
+  // a local ffprobe.
 
   // Gate 1 — call length: recordings shorter than the configured minimum audit
   // duration are skipped before incurring any transcription/audit cost. Fail
@@ -85,25 +76,21 @@ export async function processTranscription(recordingKey: string, queueTeamId: st
   // runtime-configurable `min_audit_duration_sec` (env fallback).
   const minDuration = settings.min_audit_duration_sec;
   if (minDuration > 0 && durationSec > 0 && durationSec < minDuration) {
-    await updateAudit(auditId, { status: "skipped", skip_reason: "too_short", duration_sec: Math.round(durationSec) });
+    await recordSkip("too_short", day, durationSec);
     logger.info(`Skipping ${auditId} — call too short (${durationSec.toFixed(1)}s < ${minDuration}s)`);
     return;
   }
 
   // Gate 2 — team mapping. Without a team there is no rubric, so the audit can
   // never complete: transcribing it would spend money on a call that is
-  // guaranteed to fail at stage 2. Skip before that spend. This is recoverable —
-  // `skipped` stays re-processable, so mapping the agent and reprocessing picks
-  // the call back up. It also has to run BEFORE the cap gate, because the cap is
-  // keyed on the team and would otherwise be bypassed entirely for these calls.
+  // guaranteed to fail at stage 2. Skip before that spend. Recoverable — map the
+  // agent and re-ingest the recording. It also has to run BEFORE the cap gate,
+  // because the cap is keyed on the team and would otherwise be bypassed
+  // entirely for exactly these calls.
   if (!team) {
-    await updateAudit(auditId, {
-      status: "skipped",
-      skip_reason: "no_team",
-      duration_sec: durationSec > 0 ? Math.round(durationSec) : undefined,
-    });
+    await recordSkip("no_team", day, durationSec);
     logger.warn(
-      `Skipping ${auditId} — no team mapping for agent ${meta.agent_id}; map the agent and reprocess to audit it`
+      `Skipping ${auditId} — no team mapping for agent ${meta.agent_id}; map the agent and re-ingest to audit it`
     );
     return;
   }
@@ -115,20 +102,48 @@ export async function processTranscription(recordingKey: string, queueTeamId: st
   // a second one.
   const teamRow = await getTeam(team);
   const cap = teamRow?.daily_audit_cap ?? 0;
-  const day = meta.call_datetime.slice(0, 10); // YYYY-MM-DD (the call's date)
   let reserved = false;
   if (cap > 0) {
     const slot = await reserveDailySlot(meta.agent_id, day, cap, auditId);
     if (!slot.granted) {
-      await updateAudit(auditId, {
-        status: "skipped",
-        skip_reason: "daily_cap",
-        duration_sec: durationSec > 0 ? Math.round(durationSec) : undefined,
-      });
+      await recordSkip("daily_cap", day, durationSec);
       logger.info(`Skipping ${auditId} — daily cap reached for agent ${meta.agent_id} (${slot.used}/${cap} on ${day})`);
       return;
     }
     reserved = true;
+  }
+
+  // ---- Past the gates: this call is going to be transcribed, so it earns a row.
+  // The conditional create is what serializes two concurrent first-time
+  // deliveries of the same recording — the loser backs off here rather than
+  // paying to transcribe it twice.
+  const now = new Date().toISOString();
+  const record: AuditRecord = {
+    audit_id: auditId,
+    recording_key: recordingKey,
+    recording_url: s3Url(infra.recording_bucket, recordingKey),
+    agent_id: meta.agent_id,
+    session_id: meta.session_id,
+    campaign: meta.campaign,
+    customer_number: meta.customer_number,
+    call_datetime: meta.call_datetime,
+    team,
+    status: "transcribing",
+    duration_sec: durationSec > 0 ? Math.round(durationSec) : undefined,
+    created_at: now,
+    updated_at: now,
+  };
+  const created = await createAuditIfAbsent(record);
+  if (!created) {
+    const existing = await getAudit(auditId);
+    if (existing && existing.status !== "failed" && existing.status !== "queued") {
+      logger.info(`Skipping ${auditId} — another worker already claimed it (status=${existing.status})`);
+      // Deliberately NOT releasing the slot: reservations are keyed on audit_id,
+      // so both workers hold the *same* slot. The winner is transcribing under
+      // it, and releasing here would free the slot out from under them.
+      return;
+    }
+    await setStatus(auditId, "transcribing");
   }
 
   const { transcription_model } = settings;

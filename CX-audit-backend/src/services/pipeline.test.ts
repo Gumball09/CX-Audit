@@ -25,6 +25,7 @@ const m = vi.hoisted(() => ({
   sendMessage: vi.fn(),
   getModelSettingsCached: vi.fn(),
   resolveTeamInfra: vi.fn(),
+  recordSkip: vi.fn(),
 }));
 
 vi.mock("../lib/filename.js", () => ({
@@ -53,6 +54,7 @@ vi.mock("../db/quota.js", () => ({
   reserveDailySlot: m.reserveDailySlot,
   releaseDailySlot: m.releaseDailySlot,
 }));
+vi.mock("../db/skipStats.js", () => ({ recordSkip: m.recordSkip }));
 vi.mock("../db/rubrics.js", () => ({ listRubricsByTeam: vi.fn() }));
 vi.mock("../db/performance.js", () => ({ recordAuditPerformance: vi.fn() }));
 vi.mock("../db/settings.js", () => ({ getModelSettingsCached: m.getModelSettingsCached }));
@@ -64,11 +66,19 @@ const AUDIT_ID = "460015-1781072881-378068";
 const AGENT = "460015";
 const KEY = "cz-scaler-support-calls/Scaler/2026_07_20/agent-460015-x.mp3";
 
-/** The last patch handed to updateAudit. */
-const lastPatch = () => m.updateAudit.mock.calls.at(-1)?.[1];
+/**
+ * A skipped call must leave no trace in cx_audits — that is the whole point of
+ * the gates running before the row is created.
+ */
+function expectNoRowWritten() {
+  expect(m.createAuditIfAbsent).not.toHaveBeenCalled();
+  expect(m.updateAudit).not.toHaveBeenCalled();
+  expect(m.setStatus).not.toHaveBeenCalled();
+}
 
 beforeEach(() => {
   Object.values(m).forEach((fn) => fn.mockReset());
+  m.getAudit.mockResolvedValue(undefined); // no prior row by default
 
   m.resolveRecordingMeta.mockResolvedValue({
     agent_id: AGENT,
@@ -99,12 +109,13 @@ beforeEach(() => {
 });
 
 describe("no_team gate", () => {
-  it("skips an unmapped agent without transcribing it", async () => {
+  it("skips an unmapped agent without transcribing it, and writes no row", async () => {
     m.getUserByAgentId.mockResolvedValue(undefined); // no mapping
     await processTranscription(KEY, null); // null = global queue, so no queue team either
 
     expect(m.transcribeAudio).not.toHaveBeenCalled();
-    expect(lastPatch()).toMatchObject({ status: "skipped", skip_reason: "no_team" });
+    expectNoRowWritten();
+    expect(m.recordSkip).toHaveBeenCalledWith("no_team", "2026-07-20", 900);
   });
 
   it("runs before the cap gate, so unmapped calls never consume a slot", async () => {
@@ -116,13 +127,6 @@ describe("no_team gate", () => {
     expect(m.reserveDailySlot).not.toHaveBeenCalled();
   });
 
-  it("still records the probed duration, so skipped audio stays measurable", async () => {
-    m.getUserByAgentId.mockResolvedValue(undefined);
-    await processTranscription(KEY, null);
-
-    expect(lastPatch()).toMatchObject({ duration_sec: 900 });
-  });
-
   it("uses the queue's team when the agent has no mapping", async () => {
     m.getUserByAgentId.mockResolvedValue(undefined);
     await processTranscription(KEY, "RM"); // team-owned queue supplies the team
@@ -132,14 +136,16 @@ describe("no_team gate", () => {
 });
 
 describe("duration gate", () => {
-  it("skips a short call before transcription and before the cap", async () => {
+  it("skips a short call before transcription, before the cap, and writes no row", async () => {
     m.probeBufferDurationSec.mockResolvedValue(88); // the median call
 
     await processTranscription(KEY, null);
 
     expect(m.transcribeAudio).not.toHaveBeenCalled();
     expect(m.reserveDailySlot).not.toHaveBeenCalled();
-    expect(lastPatch()).toMatchObject({ status: "skipped", skip_reason: "too_short" });
+    expectNoRowWritten();
+    // Seconds are tallied, not just the count — audio duration is what gets billed.
+    expect(m.recordSkip).toHaveBeenCalledWith("too_short", "2026-07-20", 88);
   });
 
   it("fails open when the duration cannot be probed", async () => {
@@ -150,13 +156,14 @@ describe("duration gate", () => {
 });
 
 describe("daily cap gate", () => {
-  it("skips once the agent's slots are gone", async () => {
+  it("skips once the agent's slots are gone, and writes no row", async () => {
     m.reserveDailySlot.mockResolvedValue({ granted: false, used: 3 });
 
     await processTranscription(KEY, null);
 
     expect(m.transcribeAudio).not.toHaveBeenCalled();
-    expect(lastPatch()).toMatchObject({ status: "skipped", skip_reason: "daily_cap" });
+    expectNoRowWritten();
+    expect(m.recordSkip).toHaveBeenCalledWith("daily_cap", "2026-07-20", 900);
   });
 
   it("claims the slot against the call's date, not today", async () => {
@@ -170,6 +177,56 @@ describe("daily cap gate", () => {
 
     expect(m.reserveDailySlot).not.toHaveBeenCalled();
     expect(m.transcribeAudio).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("row creation", () => {
+  it("creates the row only once the call is committed to transcription", async () => {
+    await processTranscription(KEY, null);
+
+    expect(m.createAuditIfAbsent).toHaveBeenCalledTimes(1);
+    const row = m.createAuditIfAbsent.mock.calls[0][0];
+    expect(row).toMatchObject({
+      audit_id: AUDIT_ID,
+      agent_id: AGENT,
+      team: "CS",
+      status: "transcribing", // never persisted as "queued" then skipped
+      duration_sec: 900,
+    });
+  });
+
+  it("does not re-download a recording that is already processed", async () => {
+    m.getAudit.mockResolvedValue({ audit_id: AUDIT_ID, status: "audited" });
+
+    await processTranscription(KEY, null);
+
+    expect(m.getRecordingBuffer).not.toHaveBeenCalled();
+    expect(m.transcribeAudio).not.toHaveBeenCalled();
+    expect(m.recordSkip).not.toHaveBeenCalled(); // not a gate skip — already done
+  });
+
+  it("re-processes a previously failed row", async () => {
+    m.getAudit.mockResolvedValue({ audit_id: AUDIT_ID, status: "failed" });
+    m.createAuditIfAbsent.mockResolvedValue(false); // row already exists
+
+    await processTranscription(KEY, null);
+
+    expect(m.setStatus).toHaveBeenCalledWith(AUDIT_ID, "transcribing");
+    expect(m.transcribeAudio).toHaveBeenCalledTimes(1);
+  });
+
+  it("backs off when another worker won the race, without transcribing twice", async () => {
+    m.createAuditIfAbsent.mockResolvedValue(false);
+    m.getAudit
+      .mockResolvedValueOnce(undefined) // the early idempotency read saw nothing
+      .mockResolvedValueOnce({ audit_id: AUDIT_ID, status: "transcribing" }); // winner claimed it
+
+    await processTranscription(KEY, null);
+
+    expect(m.transcribeAudio).not.toHaveBeenCalled();
+    // Reservations are keyed on audit_id, so both workers hold the SAME slot.
+    // Releasing here would pull it out from under the worker that is using it.
+    expect(m.releaseDailySlot).not.toHaveBeenCalled();
   });
 });
 
