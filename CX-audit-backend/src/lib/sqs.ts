@@ -2,6 +2,7 @@ import {
   SendMessageCommand,
   ReceiveMessageCommand,
   DeleteMessageCommand,
+  ChangeMessageVisibilityCommand,
   type Message,
 } from "@aws-sdk/client-sqs";
 import { sqs } from "./aws.js";
@@ -40,6 +41,36 @@ export async function deleteMessage(queueUrl: string, receiptHandle: string): Pr
   await sqs.send(new DeleteMessageCommand({ QueueUrl: queueUrl, ReceiptHandle: receiptHandle }));
 }
 
+/** Extends the in-flight message's visibility timeout by `seconds`. */
+export type Heartbeat = (seconds: number) => Promise<void>;
+
+/**
+ * Push a message's invisibility further into the future.
+ *
+ * Needed because Sarvam transcription is an asynchronous batch job that can run
+ * for minutes: without extending the visibility timeout, SQS redelivers the
+ * message while the first worker is still waiting, and two workers end up
+ * tracking the same job. Best-effort — a failure here just means the message may
+ * be redelivered, which the pipeline handles idempotently via the stored job id.
+ */
+export async function extendVisibility(
+  queueUrl: string,
+  receiptHandle: string,
+  seconds: number
+): Promise<void> {
+  try {
+    await sqs.send(
+      new ChangeMessageVisibilityCommand({
+        QueueUrl: queueUrl,
+        ReceiptHandle: receiptHandle,
+        VisibilityTimeout: Math.max(30, Math.min(43200, Math.round(seconds))),
+      })
+    );
+  } catch (err) {
+    logger.warn("Could not extend message visibility; a redelivery may occur", err);
+  }
+}
+
 // ---- shared shutdown (registered once, even across many consumers) --------
 
 let shuttingDown = false;
@@ -73,7 +104,7 @@ export interface ConsumeOptions {
 export async function consume(
   queueUrl: string,
   label: string,
-  handler: (body: any, raw: Message) => Promise<void>,
+  handler: (body: any, raw: Message, heartbeat?: Heartbeat) => Promise<void>,
   opts: ConsumeOptions = {}
 ): Promise<void> {
   if (!queueUrl) throw new Error(`${label} queue URL is not configured`);
@@ -88,7 +119,12 @@ export async function consume(
   async function processOne(msg: Message): Promise<void> {
     try {
       const body = msg.Body ? JSON.parse(msg.Body) : {};
-      await handler(body, msg);
+      // Handlers that wait on long external work call this to stay owner of the
+      // message. Bound to this queue and receipt handle so callers need neither.
+      const heartbeat = msg.ReceiptHandle
+        ? (seconds: number) => extendVisibility(queueUrl, msg.ReceiptHandle!, seconds)
+        : undefined;
+      await handler(body, msg, heartbeat);
       if (msg.ReceiptHandle) await deleteMessage(queueUrl, msg.ReceiptHandle);
     } catch (err) {
       logger.error(`[${label}] message processing failed (will retry / DLQ)`, err);
@@ -133,7 +169,7 @@ export async function consume(
 export async function consumeAcrossTeams(
   stage: "transcription" | "audit",
   baseLabel: string,
-  handler: (body: any, raw: Message, teamId: string | null) => Promise<void>
+  handler: (body: any, raw: Message, teamId: string | null, heartbeat?: Heartbeat) => Promise<void>
 ): Promise<void> {
   registerShutdown();
   process.setMaxListeners(50); // many consumers share the signal handlers
@@ -151,7 +187,7 @@ export async function consumeAcrossTeams(
       if (!t.queueUrl || started.has(t.queueUrl)) continue;
       started.add(t.queueUrl);
       const label = `${baseLabel}:${t.teamId ?? "global"}`;
-      void consume(t.queueUrl, label, (body, raw) => handler(body, raw, t.teamId), {
+      void consume(t.queueUrl, label, (body, raw, hb) => handler(body, raw, t.teamId, hb), {
         concurrency: t.tuning.worker_concurrency,
         waitTimeSeconds: t.tuning.wait_time_seconds,
         batchSize: t.tuning.batch_size,

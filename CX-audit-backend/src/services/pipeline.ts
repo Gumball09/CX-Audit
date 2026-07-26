@@ -3,13 +3,14 @@ import { resolveRecordingMeta, buildAuditId } from "../lib/filename.js";
 import {
   getRecordingBuffer,
   saveTranscription,
+  saveTranscriptStructured,
   getTranscription,
   saveAuditDocument,
   s3Url,
 } from "../lib/s3.js";
-import { sendMessage } from "../lib/sqs.js";
+import { sendMessage, type Heartbeat } from "../lib/sqs.js";
 import { probeBufferDurationSec } from "../lib/audio.js";
-import { transcribeAudio, auditTranscript } from "./openai.js";
+import { transcribeCall, auditTranscript, activeProvider } from "./ai/index.js";
 import { getUserByAgentId } from "../db/users.js";
 import { getTeam } from "../db/teams.js";
 import { createAuditIfAbsent, getAudit, updateAudit, setStatus } from "../db/audits.js";
@@ -29,7 +30,18 @@ import type { AuditDocument, AuditQueueMessage, AuditRecord, RubricResult } from
  * key: the conditional create guarantees a single audit row, and a recording
  * that is already past `queued` is skipped.
  */
-export async function processTranscription(recordingKey: string, queueTeamId: string | null = null): Promise<void> {
+/**
+ * How far ahead to push the SQS visibility timeout on each poll of a running
+ * transcription job. Comfortably longer than the poll interval, so one slow
+ * status call can't let the message become visible again mid-job.
+ */
+const VISIBILITY_EXTENSION_SEC = 300;
+
+export async function processTranscription(
+  recordingKey: string,
+  queueTeamId: string | null = null,
+  heartbeat?: Heartbeat
+): Promise<void> {
   const meta = await resolveRecordingMeta(recordingKey);
   if (!meta) {
     logger.warn(`Ignoring non-recording key: ${recordingKey}`);
@@ -147,11 +159,36 @@ export async function processTranscription(recordingKey: string, queueTeamId: st
   }
 
   const { transcription_model } = settings;
-  let transcript: string;
+  let result: Awaited<ReturnType<typeof transcribeCall>>;
   let transcriptionKey: string;
+  let transcriptJsonKey: string | undefined;
   try {
-    transcript = await transcribeAudio(buffer, meta.file_name, transcription_model);
-    transcriptionKey = await saveTranscription(transcript, auditId, infra.output_bucket);
+    result = await transcribeCall(buffer, meta.file_name, transcription_model, {
+      // Resume rather than resubmit. Sarvam transcription is a paid job, so a
+      // redelivery that re-submitted would bill the same audio twice.
+      jobId: prior?.stt_job_id ?? null,
+      onJobId: async (id) => {
+        await updateAudit(auditId, { stt_job_id: id });
+      },
+      // Stay owner of the SQS message while a batch job runs for minutes.
+      onProgress: heartbeat ? () => heartbeat(VISIBILITY_EXTENSION_SEC) : undefined,
+    });
+    transcriptionKey = await saveTranscription(result.text, auditId, infra.output_bucket);
+    // Sibling artifact with the diarized turns. The .txt above stays the audit
+    // input and what the dashboard renders, so nothing downstream has to change.
+    if (result.turns.length > 0) {
+      transcriptJsonKey = await saveTranscriptStructured(
+        {
+          audit_id: auditId,
+          language_code: result.languageCode,
+          speaker_roles: result.roles,
+          talk_time_sec: result.talkTimeSec,
+          turns: result.turns,
+        },
+        auditId,
+        infra.output_bucket
+      );
+    }
   } catch (err) {
     // Hand the slot back so a permanently broken recording doesn't hold one of
     // the agent's daily slots. A redelivery re-claims it (idempotently, by
@@ -166,7 +203,19 @@ export async function processTranscription(recordingKey: string, queueTeamId: st
     transcription_key: transcriptionKey,
     transcription_url: s3Url(infra.output_bucket, transcriptionKey),
     transcribed_at: new Date().toISOString(),
+    ai_provider: activeProvider,
+    transcript_json_key: transcriptJsonKey,
+    speaker_roles: result.roles,
+    talk_time_sec: result.talkTimeSec,
+    detected_language: result.languageCode ?? undefined,
   });
+
+  if (result.roles.agent && result.roles.confidence < 0.5) {
+    logger.warn(
+      `${auditId}: speaker attribution is low-confidence (${result.roles.confidence.toFixed(2)}, ` +
+        `via ${result.roles.method}) — the audit will still run, but treat agent/customer labels with caution`
+    );
+  }
 
   const message: AuditQueueMessage = {
     audit_id: auditId,

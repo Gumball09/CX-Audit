@@ -32,14 +32,16 @@ async function main() {
   initSentry("transcribe");
   // Consume the global queue + every active team's own transcription queue.
   // `teamId` (null = global) tells the pipeline which team's infra to use.
-  await consumeAcrossTeams("transcription", "transcribe", async (body, _raw, teamId) => {
+  await consumeAcrossTeams("transcription", "transcribe", async (body, _raw, teamId, heartbeat) => {
     const keys = extractKeys(body);
     if (keys.length === 0) {
       logger.debug("No recording keys in message; ignoring");
       return;
     }
     for (const key of keys) {
-      await processTranscription(key, teamId);
+      // `heartbeat` keeps this message invisible while an asynchronous
+      // transcription job runs, which can take minutes on the Sarvam path.
+      await processTranscription(key, teamId, heartbeat);
     }
   });
 }

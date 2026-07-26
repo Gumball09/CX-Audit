@@ -210,6 +210,29 @@ export interface AuditRecord {
   skip_reason?: "too_short" | "daily_cap" | "no_team";
   error?: string;
 
+  // ---- provider + diarization, set by the transcription stage ----
+  /** Which AI provider produced this audit. Absent on pre-migration rows. */
+  ai_provider?: "sarvam" | "openai";
+  /**
+   * Provider job id for asynchronous transcription (Sarvam Batch). Persisted
+   * before the wait begins so an SQS redelivery resumes the same job rather than
+   * paying to transcribe the recording a second time.
+   */
+  stt_job_id?: string;
+  /** S3 key of the diarized sibling transcript (turns + timestamps). */
+  transcript_json_key?: string;
+  /** Which diarization speaker was the agent, and how confident we are. */
+  speaker_roles?: {
+    agent: string | null;
+    customer: string | null;
+    confidence: number;
+    method: "channel" | "llm" | "heuristic" | "unknown";
+  };
+  /** Seconds each side held the floor — the agent's talk vs listen balance. */
+  talk_time_sec?: { agent: number; customer: number };
+  /** Language the provider detected, e.g. "hi-IN". */
+  detected_language?: string;
+
   transcription_key?: string;
   transcription_url?: string;
   audit_key?: string;

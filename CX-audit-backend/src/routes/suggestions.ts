@@ -13,7 +13,7 @@ import {
   setSuggestionStatus,
   newSuggestionId,
 } from "../db/suggestions.js";
-import { suggestRubricImprovements, type Scorable } from "../services/openai.js";
+import { suggestRubricImprovements, type Scorable } from "../services/ai/index.js";
 import { getModelSettingsCached } from "../db/settings.js";
 import type { RubricSuggestion, SuggestionStatus } from "../types.js";
 
