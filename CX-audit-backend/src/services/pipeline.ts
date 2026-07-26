@@ -3,13 +3,17 @@ import { resolveRecordingMeta, buildAuditId } from "../lib/filename.js";
 import {
   getRecordingBuffer,
   saveTranscription,
+  saveTranscriptStructured,
   getTranscription,
   saveAuditDocument,
   s3Url,
 } from "../lib/s3.js";
-import { sendMessage } from "../lib/sqs.js";
+import { sendMessage, type Heartbeat } from "../lib/sqs.js";
 import { probeBufferDurationSec } from "../lib/audio.js";
-import { transcribeAudio, auditTranscript } from "./openai.js";
+import { transcribeCall, auditTranscript } from "./ai/index.js";
+// Imported from the contract module rather than the dispatcher so an `instanceof`
+// check still works when tests mock the dispatcher.
+import { TranscriptValidationError } from "./ai/types.js";
 import { getUserByAgentId } from "../db/users.js";
 import { getTeam } from "../db/teams.js";
 import { createAuditIfAbsent, getAudit, updateAudit, setStatus } from "../db/audits.js";
@@ -29,7 +33,18 @@ import type { AuditDocument, AuditQueueMessage, AuditRecord, RubricResult } from
  * key: the conditional create guarantees a single audit row, and a recording
  * that is already past `queued` is skipped.
  */
-export async function processTranscription(recordingKey: string, queueTeamId: string | null = null): Promise<void> {
+/**
+ * How far ahead to push the SQS visibility timeout on each poll of a running
+ * transcription job. Comfortably longer than the poll interval, so one slow
+ * status call can't let the message become visible again mid-job.
+ */
+const VISIBILITY_EXTENSION_SEC = 300;
+
+export async function processTranscription(
+  recordingKey: string,
+  queueTeamId: string | null = null,
+  heartbeat?: Heartbeat
+): Promise<void> {
   const meta = await resolveRecordingMeta(recordingKey);
   if (!meta) {
     logger.warn(`Ignoring non-recording key: ${recordingKey}`);
@@ -147,16 +162,50 @@ export async function processTranscription(recordingKey: string, queueTeamId: st
   }
 
   const { transcription_model } = settings;
-  let transcript: string;
+  let result: Awaited<ReturnType<typeof transcribeCall>>;
   let transcriptionKey: string;
+  let transcriptJsonKey: string | undefined;
   try {
-    transcript = await transcribeAudio(buffer, meta.file_name, transcription_model);
-    transcriptionKey = await saveTranscription(transcript, auditId, infra.output_bucket);
+    result = await transcribeCall(settings.ai_provider, buffer, meta.file_name, transcription_model, {
+      // Resume rather than resubmit. Sarvam transcription is a paid job, so a
+      // redelivery that re-submitted would bill the same audio twice.
+      jobId: prior?.stt_job_id ?? null,
+      onJobId: async (id) => {
+        await updateAudit(auditId, { stt_job_id: id });
+      },
+      // Stay owner of the SQS message while a batch job runs for minutes.
+      onProgress: heartbeat ? () => heartbeat(VISIBILITY_EXTENSION_SEC) : undefined,
+    });
+    transcriptionKey = await saveTranscription(result.text, auditId, infra.output_bucket);
+    // Sibling artifact with the diarized turns. The .txt above stays the audit
+    // input and what the dashboard renders, so nothing downstream has to change.
+    if (result.turns.length > 0) {
+      transcriptJsonKey = await saveTranscriptStructured(
+        {
+          audit_id: auditId,
+          language_code: result.languageCode,
+          speaker_roles: result.roles,
+          talk_time_sec: result.talkTimeSec,
+          turns: result.turns,
+        },
+        auditId,
+        infra.output_bucket
+      );
+    }
   } catch (err) {
     // Hand the slot back so a permanently broken recording doesn't hold one of
     // the agent's daily slots. A redelivery re-claims it (idempotently, by
     // audit_id), so a transient failure still only ever consumes one.
     if (reserved) await releaseDailySlot(meta.agent_id, day, auditId);
+    // A timeline fault means the provider returned a transcript that contradicts
+    // the audio. Terminal, not retryable: the fault is deterministic, so letting
+    // SQS redeliver would pay to transcribe the same recording again for the same
+    // wrong answer. Fail the row so it is visible, and drop the message.
+    if (err instanceof TranscriptValidationError) {
+      logger.error(`${auditId} failed transcript validation: ${err.message}`);
+      await setStatus(auditId, "failed", err.message);
+      return;
+    }
     throw err;
   }
 
@@ -166,7 +215,19 @@ export async function processTranscription(recordingKey: string, queueTeamId: st
     transcription_key: transcriptionKey,
     transcription_url: s3Url(infra.output_bucket, transcriptionKey),
     transcribed_at: new Date().toISOString(),
+    ai_provider: settings.ai_provider,
+    transcript_json_key: transcriptJsonKey,
+    speaker_roles: result.roles,
+    talk_time_sec: result.talkTimeSec,
+    detected_language: result.languageCode ?? undefined,
   });
+
+  if (result.roles.agent && result.roles.confidence < 0.5) {
+    logger.warn(
+      `${auditId}: speaker attribution is low-confidence (${result.roles.confidence.toFixed(2)}, ` +
+        `via ${result.roles.method}) — the audit will still run, but treat agent/customer labels with caution`
+    );
+  }
 
   const message: AuditQueueMessage = {
     audit_id: auditId,
@@ -211,7 +272,24 @@ export async function processAudit(message: AuditQueueMessage): Promise<void> {
 
   await setStatus(audit_id, "auditing");
   const transcript = await getTranscription(transcription_key, infra.output_bucket);
-  const { audit_model } = await getModelSettingsCached();
+  // An empty transcript is not scoreable, and the auditor will not tell us so — it
+  // will return plausible criterion scores for a blank call, which then land on a
+  // real agent's record. The provider rejects this case too; this second check
+  // covers every path into the audit stage, including older rows and any future
+  // provider that returns nothing without saying so.
+  if (!transcript.trim()) {
+    await setStatus(
+      audit_id,
+      "failed",
+      `Transcript at ${transcription_key} is empty — refusing to score a blank call. Re-ingest the recording to retry.`
+    );
+    logger.error(`${audit_id}: empty transcript at ${transcription_key}; not auditing`);
+    return;
+  }
+  // Read fresh rather than trusting the provider stamped at transcription time:
+  // the transcript is just text, so auditing it with whatever provider is current
+  // is correct, and it means a switch takes effect on the audit stage immediately.
+  const { audit_model, ai_provider } = await getModelSettingsCached();
 
   // Score against the primary rubric (the team row) + every active additional
   // rubric for the team. Each produces its own RubricResult.
@@ -223,7 +301,7 @@ export async function processAudit(message: AuditQueueMessage): Promise<void> {
 
   const rubricResults: RubricResult[] = [];
   for (const s of scorables) {
-    const r = await auditTranscript(transcript, s.spec, { audit_id, agent_id, team }, audit_model);
+    const r = await auditTranscript(ai_provider, transcript, s.spec, { audit_id, agent_id, team }, audit_model);
     rubricResults.push({
       rubric_id: s.rubric_id,
       rubric_name: s.spec.name,

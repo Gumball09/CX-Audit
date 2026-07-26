@@ -4,7 +4,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
  * Gate behaviour for pipeline stage 1.
  *
  * The gates exist to stop spend *before* it happens, so what matters in every
- * case below is not just the resulting status — it is whether `transcribeAudio`
+ * case below is not just the resulting status — it is whether `transcribeCall`
  * was called at all.
  */
 
@@ -20,12 +20,15 @@ const m = vi.hoisted(() => ({
   releaseDailySlot: vi.fn(),
   getRecordingBuffer: vi.fn(),
   saveTranscription: vi.fn(),
+  saveTranscriptStructured: vi.fn(),
   probeBufferDurationSec: vi.fn(),
-  transcribeAudio: vi.fn(),
+  transcribeCall: vi.fn(),
   sendMessage: vi.fn(),
   getModelSettingsCached: vi.fn(),
   resolveTeamInfra: vi.fn(),
   recordSkip: vi.fn(),
+  getTranscription: vi.fn(),
+  auditTranscript: vi.fn(),
 }));
 
 vi.mock("../lib/filename.js", () => ({
@@ -35,13 +38,17 @@ vi.mock("../lib/filename.js", () => ({
 vi.mock("../lib/s3.js", () => ({
   getRecordingBuffer: m.getRecordingBuffer,
   saveTranscription: m.saveTranscription,
-  getTranscription: vi.fn(),
+  saveTranscriptStructured: m.saveTranscriptStructured,
+  getTranscription: m.getTranscription,
   saveAuditDocument: vi.fn(),
   s3Url: () => "s3://bucket/key",
 }));
 vi.mock("../lib/sqs.js", () => ({ sendMessage: m.sendMessage }));
 vi.mock("../lib/audio.js", () => ({ probeBufferDurationSec: m.probeBufferDurationSec }));
-vi.mock("./openai.js", () => ({ transcribeAudio: m.transcribeAudio, auditTranscript: vi.fn() }));
+vi.mock("./ai/index.js", () => ({
+  transcribeCall: m.transcribeCall,
+  auditTranscript: m.auditTranscript,
+}));
 vi.mock("../db/users.js", () => ({ getUserByAgentId: m.getUserByAgentId }));
 vi.mock("../db/teams.js", () => ({ getTeam: m.getTeam }));
 vi.mock("../db/audits.js", () => ({
@@ -60,7 +67,7 @@ vi.mock("../db/performance.js", () => ({ recordAuditPerformance: vi.fn() }));
 vi.mock("../db/settings.js", () => ({ getModelSettingsCached: m.getModelSettingsCached }));
 vi.mock("./teamInfra.js", () => ({ resolveTeamInfra: m.resolveTeamInfra }));
 
-const { processTranscription } = await import("./pipeline.js");
+const { processTranscription, processAudit } = await import("./pipeline.js");
 
 const AUDIT_ID = "460015-1781072881-378068";
 const AGENT = "460015";
@@ -97,14 +104,27 @@ beforeEach(() => {
   m.getRecordingBuffer.mockResolvedValue(Buffer.from("audio"));
   m.probeBufferDurationSec.mockResolvedValue(900); // 15 min — comfortably auditable
   m.getModelSettingsCached.mockResolvedValue({
-    transcription_model: "gpt-4o-mini-transcribe",
-    audit_model: "gpt-4o",
+    ai_provider: "sarvam",
+    transcription_model: "saaras:v3",
+    audit_model: "sarvam-105b",
     min_audit_duration_sec: 600,
   });
   m.getUserByAgentId.mockResolvedValue({ agent_id: AGENT, team: "CS" });
   m.getTeam.mockResolvedValue({ team_id: "CS", daily_audit_cap: 3 });
   m.reserveDailySlot.mockResolvedValue({ granted: true, used: 1 });
-  m.transcribeAudio.mockResolvedValue("AGENT: hi\nCUSTOMER: hello");
+  // transcribeCall returns a diarized result now, not a bare string.
+  m.transcribeCall.mockResolvedValue({
+    text: "AGENT: hi\nCUSTOMER: hello",
+    turns: [
+      { speaker_id: "0", role: "agent", start_sec: 0, end_sec: 3, text: "hi" },
+      { speaker_id: "1", role: "customer", start_sec: 3, end_sec: 6, text: "hello" },
+    ],
+    roles: { agent: "0", customer: "1", confidence: 0.95, method: "llm" },
+    talkTimeSec: { agent: 3, customer: 3 },
+    languageCode: "hi-IN",
+    jobId: "job-abc",
+  });
+  m.saveTranscriptStructured.mockResolvedValue("transcriptions/x.json");
   m.saveTranscription.mockResolvedValue("transcriptions/x.txt");
 });
 
@@ -113,7 +133,7 @@ describe("no_team gate", () => {
     m.getUserByAgentId.mockResolvedValue(undefined); // no mapping
     await processTranscription(KEY, null); // null = global queue, so no queue team either
 
-    expect(m.transcribeAudio).not.toHaveBeenCalled();
+    expect(m.transcribeCall).not.toHaveBeenCalled();
     expectNoRowWritten();
     expect(m.recordSkip).toHaveBeenCalledWith("no_team", "2026-07-20", 900);
   });
@@ -131,7 +151,7 @@ describe("no_team gate", () => {
     m.getUserByAgentId.mockResolvedValue(undefined);
     await processTranscription(KEY, "RM"); // team-owned queue supplies the team
 
-    expect(m.transcribeAudio).toHaveBeenCalledTimes(1);
+    expect(m.transcribeCall).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -141,7 +161,7 @@ describe("duration gate", () => {
 
     await processTranscription(KEY, null);
 
-    expect(m.transcribeAudio).not.toHaveBeenCalled();
+    expect(m.transcribeCall).not.toHaveBeenCalled();
     expect(m.reserveDailySlot).not.toHaveBeenCalled();
     expectNoRowWritten();
     // Seconds are tallied, not just the count — audio duration is what gets billed.
@@ -151,7 +171,7 @@ describe("duration gate", () => {
   it("fails open when the duration cannot be probed", async () => {
     m.probeBufferDurationSec.mockResolvedValue(0);
     await processTranscription(KEY, null);
-    expect(m.transcribeAudio).toHaveBeenCalledTimes(1);
+    expect(m.transcribeCall).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -161,7 +181,7 @@ describe("daily cap gate", () => {
 
     await processTranscription(KEY, null);
 
-    expect(m.transcribeAudio).not.toHaveBeenCalled();
+    expect(m.transcribeCall).not.toHaveBeenCalled();
     expectNoRowWritten();
     expect(m.recordSkip).toHaveBeenCalledWith("daily_cap", "2026-07-20", 900);
   });
@@ -176,7 +196,7 @@ describe("daily cap gate", () => {
     await processTranscription(KEY, null);
 
     expect(m.reserveDailySlot).not.toHaveBeenCalled();
-    expect(m.transcribeAudio).toHaveBeenCalledTimes(1);
+    expect(m.transcribeCall).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -201,7 +221,7 @@ describe("row creation", () => {
     await processTranscription(KEY, null);
 
     expect(m.getRecordingBuffer).not.toHaveBeenCalled();
-    expect(m.transcribeAudio).not.toHaveBeenCalled();
+    expect(m.transcribeCall).not.toHaveBeenCalled();
     expect(m.recordSkip).not.toHaveBeenCalled(); // not a gate skip — already done
   });
 
@@ -212,7 +232,7 @@ describe("row creation", () => {
     await processTranscription(KEY, null);
 
     expect(m.setStatus).toHaveBeenCalledWith(AUDIT_ID, "transcribing");
-    expect(m.transcribeAudio).toHaveBeenCalledTimes(1);
+    expect(m.transcribeCall).toHaveBeenCalledTimes(1);
   });
 
   it("backs off when another worker won the race, without transcribing twice", async () => {
@@ -223,16 +243,123 @@ describe("row creation", () => {
 
     await processTranscription(KEY, null);
 
-    expect(m.transcribeAudio).not.toHaveBeenCalled();
+    expect(m.transcribeCall).not.toHaveBeenCalled();
     // Reservations are keyed on audit_id, so both workers hold the SAME slot.
     // Releasing here would pull it out from under the worker that is using it.
     expect(m.releaseDailySlot).not.toHaveBeenCalled();
   });
 });
 
+describe("async transcription (Sarvam batch)", () => {
+  it("persists the job id before the wait, so a redelivery can resume it", async () => {
+    m.transcribeCall.mockImplementation(async (_p: any, _b: any, _f: any, _m: any, opts: any) => {
+      await opts.onJobId("job-xyz");
+      return {
+        text: "AGENT: hi", turns: [], roles: { agent: null, customer: null, confidence: 0, method: "unknown" },
+        talkTimeSec: { agent: 0, customer: 0 }, languageCode: null, jobId: "job-xyz",
+      };
+    });
+
+    await processTranscription(KEY, null);
+
+    // Written mid-flight, not at the end — the whole point is that it survives a
+    // crash between submitting the job and finishing it.
+    expect(m.updateAudit).toHaveBeenCalledWith(AUDIT_ID, { stt_job_id: "job-xyz" });
+  });
+
+  it("passes a stored job id back so the same audio isn't billed twice", async () => {
+    m.getAudit.mockResolvedValue({ audit_id: AUDIT_ID, status: "failed", stt_job_id: "job-earlier" });
+    m.createAuditIfAbsent.mockResolvedValue(false);
+
+    await processTranscription(KEY, null);
+
+    expect(m.transcribeCall).toHaveBeenCalledWith(
+      "sarvam", expect.anything(), expect.anything(), expect.anything(),
+      expect.objectContaining({ jobId: "job-earlier" })
+    );
+  });
+
+  it("dispatches to the provider named in platform settings, not a build constant", async () => {
+    // The provider is a runtime setting a super_admin can flip, so the pipeline
+    // must read it per call rather than bake it in at deploy time.
+    m.getModelSettingsCached.mockResolvedValue({
+      ai_provider: "openai",
+      transcription_model: "gpt-4o-mini-transcribe",
+      audit_model: "gpt-4o",
+      min_audit_duration_sec: 600,
+    });
+
+    await processTranscription(KEY, null);
+
+    expect(m.transcribeCall).toHaveBeenCalledWith(
+      "openai", expect.anything(), "agent-460015-x.mp3", "gpt-4o-mini-transcribe", expect.anything()
+    );
+    expect(m.updateAudit).toHaveBeenCalledWith(
+      AUDIT_ID, expect.objectContaining({ ai_provider: "openai" })
+    );
+  });
+
+  it("heartbeats the SQS message while a job runs", async () => {
+    const heartbeat = vi.fn().mockResolvedValue(undefined);
+    m.transcribeCall.mockImplementation(async (_p: any, _b: any, _f: any, _m: any, opts: any) => {
+      await opts.onProgress();
+      await opts.onProgress();
+      return {
+        text: "AGENT: hi", turns: [], roles: { agent: null, customer: null, confidence: 0, method: "unknown" },
+        talkTimeSec: { agent: 0, customer: 0 }, languageCode: null, jobId: "j",
+      };
+    });
+
+    await processTranscription(KEY, null, heartbeat);
+
+    // Without this the message becomes visible again mid-job and a second worker
+    // starts tracking the same transcription.
+    expect(heartbeat).toHaveBeenCalledTimes(2);
+  });
+
+  it("stores the diarized sibling transcript and the attribution metadata", async () => {
+    await processTranscription(KEY, null);
+
+    expect(m.saveTranscriptStructured).toHaveBeenCalledTimes(1);
+    const doc = m.saveTranscriptStructured.mock.calls[0][0];
+    expect(doc).toMatchObject({
+      audit_id: AUDIT_ID,
+      language_code: "hi-IN",
+      speaker_roles: { agent: "0", customer: "1" },
+    });
+    expect(doc.turns).toHaveLength(2);
+
+    const patch = m.updateAudit.mock.calls.map(([, p]: any) => p).find((p: any) => p?.status === "transcribed");
+    expect(patch).toMatchObject({
+      ai_provider: "sarvam",
+      transcript_json_key: "transcriptions/x.json",
+      detected_language: "hi-IN",
+      talk_time_sec: { agent: 3, customer: 3 },
+    });
+  });
+
+  it("still audits a call the provider could not diarize", async () => {
+    m.transcribeCall.mockResolvedValue({
+      text: "flat transcript with no speaker labels",
+      turns: [],
+      roles: { agent: null, customer: null, confidence: 0, method: "unknown" },
+      talkTimeSec: { agent: 0, customer: 0 },
+      languageCode: "en-IN",
+      jobId: "j",
+    });
+
+    await processTranscription(KEY, null);
+
+    // No sibling JSON, but the call is transcribed and handed to the audit stage:
+    // an audit without attribution beats no audit.
+    expect(m.saveTranscriptStructured).not.toHaveBeenCalled();
+    expect(m.sendMessage).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("slot release", () => {
   it("hands the slot back when transcription fails", async () => {
-    m.transcribeAudio.mockRejectedValue(new Error("Sarvam job failed"));
+    m.transcribeCall.mockRejectedValue(new Error("Sarvam job failed"));
 
     await expect(processTranscription(KEY, null)).rejects.toThrow("Sarvam job failed");
     expect(m.releaseDailySlot).toHaveBeenCalledWith(AGENT, "2026-07-20", AUDIT_ID);
@@ -246,9 +373,43 @@ describe("slot release", () => {
 
   it("does not release a slot it never claimed", async () => {
     m.getTeam.mockResolvedValue({ team_id: "CS", daily_audit_cap: 0 }); // uncapped
-    m.transcribeAudio.mockRejectedValue(new Error("boom"));
+    m.transcribeCall.mockRejectedValue(new Error("boom"));
 
     await expect(processTranscription(KEY, null)).rejects.toThrow("boom");
     expect(m.releaseDailySlot).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Stage 2 must refuse to score a call it has no words for.
+ *
+ * Not defensive padding — this was observed live. Feeding Sarvam un-normalised
+ * 48 kHz audio returned a *completed* job with zero turns and an empty transcript,
+ * no error anywhere. An auditor handed a blank transcript does not object; it
+ * returns plausible criterion scores, which then land on a real agent's record.
+ */
+describe("empty transcripts are never scored", () => {
+  beforeEach(() => {
+    m.getAudit.mockResolvedValue({
+      audit_id: AUDIT_ID, agent_id: AGENT, team: "CS", status: "transcribed",
+    });
+    m.getTeam.mockResolvedValue({ team: "CS", name: "CS", criteria: [], system_prompt: "x" });
+  });
+
+  it("fails the audit instead of asking the model to score nothing", async () => {
+    m.getTranscription.mockResolvedValue("");
+
+    await processAudit({ audit_id: AUDIT_ID, agent_id: AGENT, transcription_key: "t/x.txt" });
+
+    expect(m.auditTranscript).not.toHaveBeenCalled();
+    expect(m.setStatus).toHaveBeenCalledWith(AUDIT_ID, "failed", expect.stringContaining("empty"));
+  });
+
+  it("treats a whitespace-only transcript the same way", async () => {
+    m.getTranscription.mockResolvedValue("   \n\n  ");
+
+    await processAudit({ audit_id: AUDIT_ID, agent_id: AGENT, transcription_key: "t/x.txt" });
+
+    expect(m.auditTranscript).not.toHaveBeenCalled();
   });
 });

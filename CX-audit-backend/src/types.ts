@@ -210,6 +210,29 @@ export interface AuditRecord {
   skip_reason?: "too_short" | "daily_cap" | "no_team";
   error?: string;
 
+  // ---- provider + diarization, set by the transcription stage ----
+  /** Which AI provider produced this audit. Absent on pre-migration rows. */
+  ai_provider?: "sarvam" | "openai";
+  /**
+   * Provider job id for asynchronous transcription (Sarvam Batch). Persisted
+   * before the wait begins so an SQS redelivery resumes the same job rather than
+   * paying to transcribe the recording a second time.
+   */
+  stt_job_id?: string;
+  /** S3 key of the diarized sibling transcript (turns + timestamps). */
+  transcript_json_key?: string;
+  /** Which diarization speaker was the agent, and how confident we are. */
+  speaker_roles?: {
+    agent: string | null;
+    customer: string | null;
+    confidence: number;
+    method: "channel" | "llm" | "heuristic" | "unknown";
+  };
+  /** Seconds each side held the floor — the agent's talk vs listen balance. */
+  talk_time_sec?: { agent: number; customer: number };
+  /** Language the provider detected, e.g. "hi-IN". */
+  detected_language?: string;
+
   transcription_key?: string;
   transcription_url?: string;
   audit_key?: string;
@@ -309,13 +332,19 @@ export interface RubricSuggestion {
 }
 
 /**
- * Singleton platform settings, editable at runtime by a super_admin. Currently
- * holds the OpenAI models used for transcription and auditing, so the models can
- * be changed from the dashboard without a redeploy. Missing values fall back to
- * the `OPENAI_*_MODEL` env vars.
+ * Singleton platform settings, editable at runtime by a super_admin: which AI
+ * provider runs the pipeline, the models it uses, and the minimum call length
+ * worth auditing — all changeable from the dashboard without a redeploy. Missing
+ * values fall back to the env defaults for the active provider.
  */
 export interface PlatformSettings {
   setting_id: string;          // singleton partition key, always "global"
+  /**
+   * Which provider transcribes and audits. Sarvam is the pipeline; OpenAI is a
+   * break-glass fallback. Switching resets the model ids below, because model
+   * names are not portable between providers.
+   */
+  ai_provider: "sarvam" | "openai";
   transcription_model: string;
   audit_model: string;
   // Minimum recording length (seconds) to audit; shorter calls are skipped

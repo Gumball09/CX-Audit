@@ -1,17 +1,11 @@
 import { OpenAI, toFile } from "openai";
-import { env } from "../env.js";
-import { logger } from "../logger.js";
-import { normalizeWeights } from "../validation.js";
-import { splitAudioOnSilence } from "../lib/audio.js";
-import { repetitionScore, collapseRepetitions } from "../lib/transcript.js";
-import type { CriterionScore, Feedback, SuggestedCriterionChange, TeamRubric } from "../types.js";
-
-// auditTranscript works on any rubric-shaped object — the team's primary rubric
-// (TeamRubric) or an additional Rubric. Both supply these scoring fields.
-export type Scorable = Pick<
-  TeamRubric,
-  "name" | "criteria" | "system_prompt" | "scale_max" | "flag_threshold" | "critical_criterion_threshold"
->;
+import { env } from "../../env.js";
+import { logger } from "../../logger.js";
+import { normalizeWeights } from "../../validation.js";
+import { splitAudioOnSilence } from "../../lib/audio.js";
+import { repetitionScore, collapseRepetitions } from "../../lib/transcript.js";
+import type { CriterionScore, Feedback, SuggestedCriterionChange } from "../../types.js";
+import type { AuditResult, Scorable, SuggestionOutput, TranscriptionResult } from "./types.js";
 
 export const openai = env.OPENAI_API_KEY
   ? new OpenAI({ apiKey: env.OPENAI_API_KEY, maxRetries: 3, timeout: 120_000 })
@@ -21,17 +15,36 @@ export const openai = env.OPENAI_API_KEY
 export const isStubMode = !openai;
 
 /**
- * Transcribe an audio buffer with Whisper. Returns stub text when no API key
- * is configured so the pipeline can be exercised end-to-end locally.
+ * OpenAI has no diarization, so every result here reports unknown speaker roles
+ * and no turns. The audit still works — it just scores the agent against a
+ * transcript that also contains the customer's words, which is precisely the
+ * limitation the Sarvam provider exists to remove.
  */
-export async function transcribeAudio(
+function undiarized(text: string): TranscriptionResult {
+  return {
+    text,
+    turns: [],
+    roles: { agent: null, customer: null, confidence: 0, method: "unknown" },
+    talkTimeSec: { agent: 0, customer: 0 },
+    languageCode: null,
+    jobId: null,
+  };
+}
+
+/**
+ * Transcribe an audio buffer. Returns stub text when no API key is configured so
+ * the pipeline can be exercised end-to-end locally.
+ */
+export async function transcribeCall(
   buffer: Buffer,
   fileName: string,
   model: string = env.OPENAI_TRANSCRIPTION_MODEL
-): Promise<string> {
+): Promise<TranscriptionResult> {
   if (!openai) {
     logger.warn("OPENAI_API_KEY not set — returning stub transcription");
-    return `[STUB TRANSCRIPT for ${fileName}] Agent: Hello, thank you for calling. Customer: Hi, I have a question about my course. Agent: Sure, I can help with that.`;
+    return undiarized(
+      `[STUB TRANSCRIPT for ${fileName}] Agent: Hello, thank you for calling. Customer: Hi, I have a question about my course. Agent: Sure, I can help with that.`
+    );
   }
 
   let text: string;
@@ -46,7 +59,7 @@ export async function transcribeAudio(
   }
   // Final safety net: drop any residual repetition loops the model emitted
   // (dense exact loops + paraphrased "restart" loops).
-  return collapseRepetitions(text, { nearDupSimilarity: env.TRANSCRIPTION_NEARDUP_SIMILARITY });
+  return undiarized(collapseRepetitions(text, { nearDupSimilarity: env.TRANSCRIPTION_NEARDUP_SIMILARITY }));
 }
 
 /** Single one-shot transcription request. */
@@ -136,13 +149,6 @@ async function transcribeChunked(buffer: Buffer, fileName: string, model: string
   return stitched;
 }
 
-export interface AuditResult {
-  score: number;
-  flagged: boolean;
-  flag_reason: string;
-  criteria_scores: CriterionScore[];
-}
-
 /**
  * Score a transcript against a team's rubric. Flagging uses the rubric's
  * thresholds: overall below `flag_threshold`, or any criterion below
@@ -213,7 +219,11 @@ export async function auditTranscript(
   const res = await openai.chat.completions.create({
     model,
     response_format: { type: "json_object" },
-    temperature: 0.3,
+    // temperature 0 — see the note in sarvam.ts. Measured on real transcripts, 0.3
+    // gave a 30-point spread in the overall score across identical runs. Scoring
+    // against a fixed rubric is extraction, not composition. Kept in step with the
+    // Sarvam path so switching provider does not change scoring behaviour.
+    temperature: 0,
     max_tokens: 900,
     messages: [
       { role: "system", content: rubric.system_prompt },
@@ -241,12 +251,6 @@ export async function auditTranscript(
     flag_reason: String(parsed.flag_reason ?? "No reason provided."),
     criteria_scores,
   };
-}
-
-export interface SuggestionOutput {
-  summary: string;
-  suggested_system_prompt: string;
-  criteria_changes: SuggestedCriterionChange[];
 }
 
 /**

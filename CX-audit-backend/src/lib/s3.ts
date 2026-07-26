@@ -92,6 +92,32 @@ export async function saveTranscription(transcript: string, baseName: string, bu
   return key;
 }
 
+/**
+ * Persist the diarized form of a transcript alongside the .txt.
+ *
+ * A separate object rather than folded into the .txt, so the existing readers —
+ * the dashboard viewer, `getTranscription`, the re-audit path — keep working
+ * unchanged, and audits recorded before diarization existed simply have no
+ * sibling file.
+ */
+export async function saveTranscriptStructured(
+  doc: unknown,
+  baseName: string,
+  bucket: string = env.S3_OUTPUT_BUCKET
+): Promise<string> {
+  const key = `${env.S3_TRANSCRIPTION_PREFIX}${baseName}.json`;
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: bucket,
+      Key: key,
+      Body: JSON.stringify(doc, null, 2),
+      ContentType: "application/json; charset=utf-8",
+    })
+  );
+  logger.info(`Saved diarized transcript: ${key}`);
+  return key;
+}
+
 /** Load a previously saved transcript. `bucket` defaults to the global output bucket. */
 export async function getTranscription(key: string, bucket: string = env.S3_OUTPUT_BUCKET): Promise<string> {
   const res = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));

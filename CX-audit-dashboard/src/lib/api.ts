@@ -374,7 +374,9 @@ export function fetchSettings(): Promise<PlatformSettings> {
 }
 
 export function updateSettings(
-  patch: Partial<Pick<PlatformSettings, "transcription_model" | "audit_model" | "min_audit_duration_sec">>
+  patch: Partial<
+    Pick<PlatformSettings, "ai_provider" | "transcription_model" | "audit_model" | "min_audit_duration_sec">
+  >
 ): Promise<PlatformSettings> {
   return request<PlatformSettings>("/settings", { method: "PATCH", body: JSON.stringify(patch) });
 }

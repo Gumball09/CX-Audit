@@ -77,6 +77,59 @@ export async function probeBufferDurationSec(buffer: Buffer, fileName: string): 
   }
 }
 
+/** Sample rate every ASR upload is normalised to. */
+export const ASR_SAMPLE_RATE = 16000;
+
+/**
+ * Re-encode a recording to 16 kHz mono WAV for speech recognition.
+ *
+ * Not a nicety — a correctness fix. Sarvam silently mis-decodes audio whose
+ * sample rate it doesn't expect: a 48 kHz mp3 came back with timestamps running
+ * to 1025s on a 359s file (a ~2.85x stretch, i.e. 48000/16000) and a transcript
+ * of confident phonetic nonsense. The identical audio at 16 kHz transcribed
+ * perfectly. It never errors, it just returns garbage, so normalising up front is
+ * the only safe option.
+ *
+ * Our CZentrix recordings are 8 kHz, which is below what was tested — upsampling
+ * to 16 kHz adds no information but puts every upload on the one rate that is
+ * known to decode correctly.
+ *
+ * Returns the original buffer unchanged if ffmpeg is unavailable or fails, so a
+ * transcode problem degrades to "maybe worse transcript" rather than "no audit".
+ */
+export async function normalizeForAsr(
+  buffer: Buffer,
+  fileName: string
+): Promise<{ buffer: Buffer; fileName: string; converted: boolean }> {
+  const dir = await mkdtemp(path.join(tmpdir(), "cx-asr-"));
+  const base = path.basename(fileName).replace(/\.[^.]+$/, "") || "audio";
+  const input = path.join(dir, path.basename(fileName) || "audio");
+  const output = path.join(dir, `${base}.wav`);
+  try {
+    await writeFile(input, buffer);
+    const { code, stderr } = await run(FFMPEG, [
+      "-v", "error",
+      "-i", input,
+      "-ac", "1",
+      "-ar", String(ASR_SAMPLE_RATE),
+      "-c:a", "pcm_s16le",
+      "-y", output,
+    ]);
+    if (code !== 0) throw new Error(`ffmpeg exited ${code}: ${stderr.slice(-300)}`);
+    const out = await readFile(output);
+    if (out.length === 0) throw new Error("ffmpeg produced an empty file");
+    return { buffer: out, fileName: `${base}.wav`, converted: true };
+  } catch (err) {
+    logger.warn(
+      `Could not normalise "${fileName}" to ${ASR_SAMPLE_RATE} Hz (${(err as Error).message}); ` +
+        `uploading it as-is — transcript quality may suffer`
+    );
+    return { buffer, fileName, converted: false };
+  } finally {
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 /** Total duration of the audio file in seconds (0 if unknown). */
 async function probeDurationSec(file: string): Promise<number> {
   const { stdout } = await run(FFPROBE, [

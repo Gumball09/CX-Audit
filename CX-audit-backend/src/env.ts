@@ -65,10 +65,46 @@ export const env = {
   DDB_TEAMS_TABLE: getEnv("DDB_TEAMS_TABLE", false, "cx_teams"),
   DDB_AUDITS_TABLE: getEnv("DDB_AUDITS_TABLE", false, "cx_audits"),
 
-  // ---- OpenAI ----
+  // ---- AI provider ----
+  // Which provider runs the pipeline. Sarvam is the default: our recordings are
+  // 8 kHz mono telephony audio in mixed Hindi/English, which is what Saaras is
+  // built for and what makes gpt-4o-transcribe hallucinate repetition loops.
+  // "openai" is a break-glass fallback, kept working but not expected to be used.
+  // Flipping it is a deploy-time decision (task definition + redeploy), not an
+  // admin toggle — an invalid value fails startup rather than silently reverting.
+  AI_PROVIDER: getEnv("AI_PROVIDER", false, "sarvam"),
+
+  // ---- OpenAI (fallback provider) ----
   OPENAI_API_KEY: getEnv("OPENAI_API_KEY", false),
   OPENAI_TRANSCRIPTION_MODEL: getEnv("OPENAI_TRANSCRIPTION_MODEL", false, "whisper-1"),
   OPENAI_AUDIT_MODEL: getEnv("OPENAI_AUDIT_MODEL", false, "gpt-4-turbo-preview"),
+
+  // ---- Sarvam ----
+  SARVAM_API_KEY: getEnv("SARVAM_API_KEY", false),
+  SARVAM_BASE_URL: getEnv("SARVAM_BASE_URL", false, "https://api.sarvam.ai"),
+  // Saaras v3 is the current ASR model; saarika:v2.5 is being deprecated.
+  SARVAM_STT_MODEL: getEnv("SARVAM_STT_MODEL", false, "saaras:v3"),
+  // transcribe | translate | verbatim | translit | codemix.
+  // "translit" keeps the call exactly as spoken but in Roman script, so a
+  // Hinglish call stays faithful and is still readable by every reviewer.
+  SARVAM_STT_MODE: getEnv("SARVAM_STT_MODE", false, "translit"),
+  // BCP-47 (hi-IN, en-IN, …) or "unknown" to auto-detect. Our calls mix
+  // languages per agent, so auto-detect is the safer default.
+  SARVAM_LANGUAGE_CODE: getEnv("SARVAM_LANGUAGE_CODE", false, "unknown"),
+  // Diarization is what separates agent from customer. It costs more per hour
+  // (₹45 vs ₹30) and is only available on the Batch API.
+  SARVAM_DIARIZATION: getEnv("SARVAM_DIARIZATION", false, "1") !== "0",
+  // Known speaker count diarizes more consistently than auto-detect. 0 = auto,
+  // for transfer/conference calls.
+  SARVAM_NUM_SPEAKERS: Number(getEnv("SARVAM_NUM_SPEAKERS", false, "2")),
+  SARVAM_AUDIT_MODEL: getEnv("SARVAM_AUDIT_MODEL", false, "sarvam-105b"),
+  // Batch jobs are asynchronous. The worker polls until the job finishes; these
+  // bound that wait. The ceiling must stay under the transcription queue's
+  // visibility timeout unless the worker heartbeats it (it does).
+  SARVAM_POLL_INTERVAL_MS: Number(getEnv("SARVAM_POLL_INTERVAL_MS", false, "5000")),
+  SARVAM_POLL_TIMEOUT_MS: Number(getEnv("SARVAM_POLL_TIMEOUT_MS", false, "1800000")),
+  // Batch accepts files up to 2 hours; anything longer is split on silence first.
+  SARVAM_MAX_FILE_SECONDS: Number(getEnv("SARVAM_MAX_FILE_SECONDS", false, "7200")),
 
   // ---- Transcription chunking (long-audio fallback) ----
   // Recordings that exceed the transcription model's input limit (e.g.
@@ -151,10 +187,24 @@ export function validateEnv(context: "api" | "worker" = "api") {
     env.S3_OUTPUT_BUCKET ? "" : "S3_OUTPUT_BUCKET is not set."
   );
 
+  // An unrecognised provider is always fatal, in every context. Falling back to a
+  // default here would silently run the whole pipeline on the wrong provider —
+  // exactly the failure this constant exists to prevent.
+  if (env.AI_PROVIDER !== "sarvam" && env.AI_PROVIDER !== "openai") {
+    fatal.push(`AI_PROVIDER must be "sarvam" or "openai" (got "${env.AI_PROVIDER}").`);
+  }
+
   if (context === "worker") {
     if (!env.SQS_TRANSCRIPTION_QUEUE_URL) fatal.push("SQS_TRANSCRIPTION_QUEUE_URL is not set.");
     if (!env.SQS_AUDIT_QUEUE_URL) fatal.push("SQS_AUDIT_QUEUE_URL is not set.");
-    if (!env.OPENAI_API_KEY) (isProd ? fatal : warnings).push("OPENAI_API_KEY missing — transcription/audit run in STUB mode.");
+    // Only the selected provider's key matters; a missing key degrades to the
+    // deterministic stub so the pipeline still runs end-to-end locally.
+    if (env.AI_PROVIDER === "sarvam" && !env.SARVAM_API_KEY) {
+      (isProd ? fatal : warnings).push("SARVAM_API_KEY missing — transcription/audit run in STUB mode.");
+    }
+    if (env.AI_PROVIDER === "openai" && !env.OPENAI_API_KEY) {
+      (isProd ? fatal : warnings).push("OPENAI_API_KEY missing — transcription/audit run in STUB mode.");
+    }
   }
 
   // Sentry is the production alerting channel — warn (don't fail) if it's off.
