@@ -761,7 +761,11 @@ export async function auditTranscript(
     `The transcript is speaker-labelled. Score the AGENT only — never penalise the agent ` +
     `for what the CUSTOMER said. Lines labelled "SPEAKER n" could not be attributed; treat them with caution.\n` +
     `The call may mix Hindi and English, written in Roman script. Judge what was meant, not the spelling.\n` +
-    `Score each criterion from 0 to ${scaleMax} and give a short explanation citing the transcript.\n` +
+    // "At most two sentences" is a cost fix, not a style preference: explanations
+    // are truncated to 600 characters when stored, so anything longer is generated,
+    // billed, and thrown away.
+    `Score each criterion from 0 to ${scaleMax} and explain in at most two sentences, ` +
+    `quoting the transcript.\n` +
     `Then provide a flag_reason summarizing any concerns.\n\n` +
     `Criteria (weights are relative and already normalized to percentages):\n${criteriaList}\n\n` +
     `Transcript:\n${transcript}\n\n` +
