@@ -59,8 +59,8 @@ suggestionsRouter.post("/generate", requireRole("admin", "super_admin"), async (
     return res.status(400).json({ message: "No feedback yet for this rubric — collect some reviewer feedback first." });
   }
 
-  const { audit_model } = await getModelSettingsCached();
-  const out = await suggestRubricImprovements(spec, feedback, audit_model);
+  const { audit_model, ai_provider } = await getModelSettingsCached();
+  const out = await suggestRubricImprovements(ai_provider, spec, feedback, audit_model);
 
   const now = new Date().toISOString();
   const suggestion: RubricSuggestion = {

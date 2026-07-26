@@ -332,13 +332,19 @@ export interface RubricSuggestion {
 }
 
 /**
- * Singleton platform settings, editable at runtime by a super_admin. Currently
- * holds the OpenAI models used for transcription and auditing, so the models can
- * be changed from the dashboard without a redeploy. Missing values fall back to
- * the `OPENAI_*_MODEL` env vars.
+ * Singleton platform settings, editable at runtime by a super_admin: which AI
+ * provider runs the pipeline, the models it uses, and the minimum call length
+ * worth auditing — all changeable from the dashboard without a redeploy. Missing
+ * values fall back to the env defaults for the active provider.
  */
 export interface PlatformSettings {
   setting_id: string;          // singleton partition key, always "global"
+  /**
+   * Which provider transcribes and audits. Sarvam is the pipeline; OpenAI is a
+   * break-glass fallback. Switching resets the model ids below, because model
+   * names are not portable between providers.
+   */
+  ai_provider: "sarvam" | "openai";
   transcription_model: string;
   audit_model: string;
   // Minimum recording length (seconds) to audit; shorter calls are skipped

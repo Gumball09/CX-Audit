@@ -5,6 +5,7 @@ import { normalizeWeights } from "../../validation.js";
 import { collapseRepetitions } from "../../lib/transcript.js";
 import { splitAudioOnSilence, probeBufferDurationSec, normalizeForAsr } from "../../lib/audio.js";
 import type { CriterionScore, Feedback } from "../../types.js";
+import { TranscriptValidationError } from "./types.js";
 import type {
   AuditResult,
   Scorable,
@@ -306,6 +307,63 @@ function toTurns(docs: SarvamTranscript[], partOffsetsSec: number[]): Transcript
   return turns;
 }
 
+/**
+ * Frame padding and rounding can push the last timestamp a little past the probed
+ * duration, so allow a margin — but nothing remotely like a decode error, which
+ * stretches the timeline by whole multiples.
+ */
+const TIMELINE_TOLERANCE = 1.1;
+const TIMELINE_GRACE_SEC = 2;
+/** Below this ratio the timeline is suspicious, but legitimately so sometimes. */
+const TIMELINE_SHORT_RATIO = 0.5;
+
+/**
+ * Check the diarized timeline against the true audio duration.
+ *
+ * This is the guard for the worst defect we found in this provider: given audio
+ * at a sample rate it doesn't expect, Sarvam returns HTTP 200 with a plausible
+ * document containing a stretched timeline and phonetic nonsense. A 48 kHz / 359s
+ * file came back with turns ending at 1025s — 2.85x, i.e. 48000/16000. Nothing
+ * about the response says it failed.
+ *
+ * Audio cannot contain speech after it ends, so an over-long timeline is a hard
+ * invariant with no false positives, and we already know the truth (`ffprobe`).
+ * A *short* timeline is only a hint — a call can legitimately end with minutes of
+ * hold music or dead air — so it warns rather than faults.
+ *
+ * Returns `{fault}` when the transcript must not be trusted, `{warning}` when it
+ * is merely odd. `durationSec <= 0` means the probe failed: we don't know the
+ * truth, so we don't guess.
+ */
+export function checkTimeline(
+  turns: TranscriptTurn[],
+  durationSec: number
+): { fault: string | null; warning: string | null } {
+  if (durationSec <= 0 || turns.length === 0) return { fault: null, warning: null };
+
+  const maxEnd = turns.reduce((m, t) => Math.max(m, t.end_sec), 0);
+  const ratio = maxEnd / durationSec;
+
+  if (maxEnd > durationSec * TIMELINE_TOLERANCE + TIMELINE_GRACE_SEC) {
+    return {
+      fault:
+        `transcript timeline ends at ${maxEnd.toFixed(0)}s but the audio is only ` +
+        `${durationSec.toFixed(0)}s long (${ratio.toFixed(2)}x) — the provider mis-decoded ` +
+        `the audio, so the transcript is not trustworthy and must not be audited`,
+      warning: null,
+    };
+  }
+  if (ratio < TIMELINE_SHORT_RATIO) {
+    return {
+      fault: null,
+      warning:
+        `transcript timeline ends at ${maxEnd.toFixed(0)}s on a ${durationSec.toFixed(0)}s ` +
+        `recording (${ratio.toFixed(2)}x) — probably a silent tail, but worth watching if it recurs`,
+    };
+  }
+  return { fault: null, warning: null };
+}
+
 /** Seconds each speaker id held the floor. */
 function talkTimeBySpeaker(turns: TranscriptTurn[]): Map<string, number> {
   const m = new Map<string, number>();
@@ -589,6 +647,17 @@ export async function transcribeCall(
   // audited, just without speaker attribution.
   if (turns.length === 0) {
     const flat = docs.map((d) => (d.transcript ?? "").trim()).filter(Boolean).join(" ");
+    // Nothing at all is a different matter, and it is not hypothetical: feeding
+    // Sarvam un-normalised 48 kHz audio returned a completed job, a well-formed
+    // document, zero turns and an empty transcript — no error anywhere. Passing
+    // that on would have the auditor score a blank call and invent numbers for a
+    // real agent, so refuse it here.
+    if (!flat) {
+      throw new TranscriptValidationError(
+        `Sarvam job ${jobId} for "${fileName}" completed but returned an empty transcript ` +
+          `(${docs.length} output doc(s), ${durationSec.toFixed(0)}s of audio) — nothing to audit`
+      );
+    }
     logger.warn(`Sarvam job ${jobId} returned no diarized turns; auditing "${fileName}" without attribution`);
     return {
       text: collapseRepetitions(flat, { nearDupSimilarity: env.TRANSCRIPTION_NEARDUP_SIMILARITY }),
@@ -598,6 +667,14 @@ export async function transcribeCall(
       languageCode,
       jobId,
     };
+  }
+
+  // Validate the timeline before spending a chat call on role mapping — and
+  // before anything downstream treats this transcript as real.
+  const timeline = checkTimeline(turns, durationSec);
+  if (timeline.warning) logger.warn(`Sarvam job ${jobId}: ${timeline.warning}`);
+  if (timeline.fault) {
+    throw new TranscriptValidationError(`Sarvam job ${jobId} for "${fileName}": ${timeline.fault}`);
   }
 
   const roles = await resolveRoles(turns, fileName);

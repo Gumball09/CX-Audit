@@ -13,7 +13,8 @@
     "infra:create": "tsx scripts/create-infra.ts",
     "seed": "tsx scripts/seed.ts",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "verify:sarvam": "tsx scripts/verify-sarvam.ts"
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.540.0",

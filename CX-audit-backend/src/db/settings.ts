@@ -2,6 +2,7 @@ import { GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
 import { ddb } from "../lib/aws.js";
 import { env } from "../env.js";
 import { logger } from "../logger.js";
+import { DEFAULT_PROVIDER, defaultModels, isProvider, type AiProvider } from "../services/ai/index.js";
 import type { PlatformSettings } from "../types.js";
 
 const TABLE = env.DDB_SETTINGS_TABLE;
@@ -9,19 +10,29 @@ const SINGLETON = "global";
 const CACHE_TTL_MS = 60_000; // read on the pipeline hot path — cache it
 
 export interface ModelSettings {
+  ai_provider: AiProvider;
   transcription_model: string;
   audit_model: string;
   min_audit_duration_sec: number;
 }
 
-/** Read the settings row, filling any missing value from the env fallback. */
+/**
+ * Read the settings row, filling any missing value from the provider's defaults.
+ *
+ * The model fallbacks are deliberately provider-scoped: model ids are not
+ * portable, so defaulting to an OpenAI id while Sarvam is active would send
+ * `gpt-4o` to api.sarvam.ai and fail every audit.
+ */
 export async function getSettings(): Promise<PlatformSettings> {
   const res = await ddb.send(new GetCommand({ TableName: TABLE, Key: { setting_id: SINGLETON } }));
   const item = res.Item as PlatformSettings | undefined;
+  const provider = isProvider(item?.ai_provider) ? item.ai_provider : DEFAULT_PROVIDER;
+  const fallback = defaultModels(provider);
   return {
     setting_id: SINGLETON,
-    transcription_model: item?.transcription_model || env.OPENAI_TRANSCRIPTION_MODEL,
-    audit_model: item?.audit_model || env.OPENAI_AUDIT_MODEL,
+    ai_provider: provider,
+    transcription_model: item?.transcription_model || fallback.transcription,
+    audit_model: item?.audit_model || fallback.audit,
     min_audit_duration_sec:
       item?.min_audit_duration_sec != null ? item.min_audit_duration_sec : env.MIN_CALL_DURATION_SECONDS,
     updated_at: item?.updated_at ?? "",
@@ -36,20 +47,27 @@ export function invalidateSettingsCache(): void {
 }
 
 /**
- * Resolve the OpenAI models to use, cached for CACHE_TTL_MS. Falls back to the
- * env defaults if the settings table is unavailable, so the pipeline keeps
+ * Resolve the active provider and its models, cached for CACHE_TTL_MS. Falls back
+ * to the env defaults if the settings table is unavailable, so the pipeline keeps
  * working even before any settings row exists.
+ *
+ * A provider change therefore takes up to CACHE_TTL_MS to reach a running worker.
+ * That is intentional: this is read once per recording, and hammering DynamoDB on
+ * the hot path to make the toggle instant is not a trade worth making.
  */
 export async function getModelSettingsCached(): Promise<ModelSettings> {
   if (cache && Date.now() - cache.at < CACHE_TTL_MS) return cache.val;
+  const fallback = defaultModels(DEFAULT_PROVIDER);
   let val: ModelSettings = {
-    transcription_model: env.OPENAI_TRANSCRIPTION_MODEL,
-    audit_model: env.OPENAI_AUDIT_MODEL,
+    ai_provider: DEFAULT_PROVIDER,
+    transcription_model: fallback.transcription,
+    audit_model: fallback.audit,
     min_audit_duration_sec: env.MIN_CALL_DURATION_SECONDS,
   };
   try {
     const s = await getSettings();
     val = {
+      ai_provider: isProvider(s.ai_provider) ? s.ai_provider : DEFAULT_PROVIDER,
       transcription_model: s.transcription_model,
       audit_model: s.audit_model,
       min_audit_duration_sec: s.min_audit_duration_sec ?? env.MIN_CALL_DURATION_SECONDS,
@@ -61,14 +79,29 @@ export async function getModelSettingsCached(): Promise<ModelSettings> {
   return val;
 }
 
-/** Persist a settings patch (super_admin). Returns the merged settings row. */
+/**
+ * Persist a settings patch (super_admin). Returns the merged settings row.
+ *
+ * Switching provider resets both model ids to the new provider's defaults unless
+ * the same request supplies them explicitly. Model ids are provider-specific, so
+ * carrying the old pair across would leave the pipeline calling one provider with
+ * the other's model names — an error on every single call.
+ */
 export async function putSettings(
-  patch: Partial<Pick<PlatformSettings, "transcription_model" | "audit_model" | "min_audit_duration_sec">>,
+  patch: Partial<
+    Pick<PlatformSettings, "ai_provider" | "transcription_model" | "audit_model" | "min_audit_duration_sec">
+  >,
   updatedBy: string | null
 ): Promise<PlatformSettings> {
   const current = await getSettings();
+  const switching = patch.ai_provider !== undefined && patch.ai_provider !== current.ai_provider;
+  const resetModels = switching ? defaultModels(patch.ai_provider as AiProvider) : null;
+
   const updated: PlatformSettings = {
     ...current,
+    ...(resetModels
+      ? { transcription_model: resetModels.transcription, audit_model: resetModels.audit }
+      : {}),
     ...Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)),
     setting_id: SINGLETON,
     updated_at: new Date().toISOString(),
@@ -76,5 +109,11 @@ export async function putSettings(
   };
   await ddb.send(new PutCommand({ TableName: TABLE, Item: updated }));
   invalidateSettingsCache();
+  if (switching) {
+    logger.warn(
+      `AI provider switched ${current.ai_provider} -> ${updated.ai_provider} by ${updatedBy ?? "unknown"}; ` +
+        `models now transcription=${updated.transcription_model} audit=${updated.audit_model}`
+    );
+  }
   return updated;
 }

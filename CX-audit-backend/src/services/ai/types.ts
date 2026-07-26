@@ -67,6 +67,32 @@ export interface SuggestionOutput {
   criteria_changes: SuggestedCriterionChange[];
 }
 
+/**
+ * The provider returned a transcript we refuse to audit.
+ *
+ * Covers both ways a silent mis-decode has actually shown up in testing, which
+ * are not the same and neither of which the provider reports as an error:
+ *
+ *   - A timeline that contradicts the audio: turns ending long after the
+ *     recording does, with a transcript of confident phonetic nonsense.
+ *   - Nothing at all: HTTP 200, a well-formed document, zero turns and an empty
+ *     transcript.
+ *
+ * The second is the more dangerous of the two, because an empty transcript looks
+ * like valid input to the auditor — it will happily score a blank call and write
+ * invented numbers onto a real agent's record.
+ *
+ * Deliberately its own type so the pipeline can treat it as terminal: the fault is
+ * deterministic for a given recording, so retrying re-submits and re-bills the
+ * same audio to get the same unusable answer.
+ */
+export class TranscriptValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TranscriptValidationError";
+  }
+}
+
 /** Options a caller can pass through to transcription. */
 export interface TranscribeOptions {
   /** Resume an already-submitted job instead of paying to submit a new one. */

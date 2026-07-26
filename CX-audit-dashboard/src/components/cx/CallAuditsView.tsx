@@ -313,6 +313,15 @@ function AuditDrawer({ audit, rubric, agentName, viewer, onClose }: { audit: Aud
               </section>
             )}
 
+            {audit.speaker_roles && (
+              <SpeakerAttribution
+                roles={audit.speaker_roles}
+                talkTime={audit.talk_time_sec}
+                language={audit.detected_language}
+                provider={audit.ai_provider}
+              />
+            )}
+
             {audit.error && (
               <section className="px-6 py-4 border-b border-border">
                 <div className="border-l-2 border-destructive bg-background p-3 rounded-r-sm text-sm text-destructive">{audit.error}</div>
@@ -566,6 +575,86 @@ function Field({ label, children, className }: { label: string; children: React.
       <label className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">{label}</label>
       {children}
     </div>
+  );
+}
+
+/** mm:ss for a talk-time figure. */
+function mmss(sec: number) {
+  const s = Math.max(0, Math.round(sec));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+/**
+ * Speaker attribution for a diarized call.
+ *
+ * This panel exists because attribution can silently degrade. The audit prompt
+ * scores the AGENT only, so if the agent/customer labels are wrong the score is
+ * measuring the wrong person — and a heuristic fallback ("whoever greeted first")
+ * is close to a coin flip on calls that don't open with a clean greeting. That was
+ * previously recorded on every row and shown nowhere, which is exactly how a
+ * silent failure stays silent. A reviewer looking at a score should be able to see
+ * how much to trust the labels underneath it.
+ */
+function SpeakerAttribution({
+  roles,
+  talkTime,
+  language,
+  provider,
+}: {
+  roles: NonNullable<Audit["speaker_roles"]>;
+  talkTime?: Audit["talk_time_sec"];
+  language?: string;
+  provider?: string;
+}) {
+  const reliable = (roles.method === "llm" || roles.method === "channel") && roles.confidence >= 0.5;
+  const pct = Math.round(roles.confidence * 100);
+
+  const explanation =
+    roles.method === "heuristic"
+      ? "Labels were guessed from who spoke first, not read from the conversation — they may be swapped."
+      : roles.method === "unknown"
+        ? "Speakers could not be told apart, so the call was scored without attribution."
+        : `Labels were assigned by reading the opening exchange (${pct}% confidence).`;
+
+  return (
+    <section className="px-6 py-4 border-b border-border" data-guide="audit-attribution">
+      <h3 className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground mb-3">
+        Speaker Attribution
+      </h3>
+      <div
+        className={[
+          "border-l-2 bg-background p-3 rounded-r-sm space-y-2",
+          reliable ? "border-border" : "border-amber-500",
+        ].join(" ")}
+      >
+        <div className="flex items-center gap-2 flex-wrap">
+          <span
+            className={[
+              "font-mono text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-sm border",
+              reliable
+                ? "border-border text-muted-foreground"
+                : "border-amber-500/40 bg-amber-500/10 text-amber-400",
+            ].join(" ")}
+          >
+            {reliable ? "attributed" : "low confidence"}
+          </span>
+          <span className="font-mono text-[11px] text-muted-foreground">
+            via {roles.method}
+            {roles.method !== "unknown" && ` · ${pct}%`}
+            {provider && ` · ${provider}`}
+            {language && ` · ${language}`}
+          </span>
+        </div>
+        <p className={["text-xs leading-relaxed", reliable ? "text-muted-foreground" : "text-amber-400"].join(" ")}>
+          {explanation}
+        </p>
+        {talkTime && (talkTime.agent > 0 || talkTime.customer > 0) && (
+          <p className="font-mono text-[11px] text-muted-foreground">
+            Talk time — agent {mmss(talkTime.agent)} · customer {mmss(talkTime.customer)}
+          </p>
+        )}
+      </div>
+    </section>
   );
 }
 

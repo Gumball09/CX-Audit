@@ -170,6 +170,26 @@ export interface Audit {
   status: AuditStatus;
   skip_reason?: "too_short" | "daily_cap" | "no_team";
   error?: string;
+
+  // ---- provider + diarization, set by the transcription stage ----
+  /** Which provider produced this audit. Absent on pre-migration rows. */
+  ai_provider?: AiProvider;
+  /**
+   * Which diarized speaker was the agent, and how the mapping was decided.
+   * Surfaced because a low-confidence or heuristic mapping means the agent/customer
+   * split — and therefore the score, which only judges the agent — may be wrong.
+   */
+  speaker_roles?: {
+    agent: string | null;
+    customer: string | null;
+    confidence: number;
+    method: "channel" | "llm" | "heuristic" | "unknown";
+  };
+  /** Seconds each side held the floor — the agent's talk vs listen balance. */
+  talk_time_sec?: { agent: number; customer: number };
+  /** Language the provider detected, e.g. "hi-IN". */
+  detected_language?: string;
+
   transcription_key?: string;
   transcription_url?: string;
   audit_key?: string;
@@ -290,20 +310,49 @@ export interface LoginTeamsResponse {
   teams: LoginTeamSeries[];
 }
 
+/** Which AI provider runs the pipeline. Sarvam is primary; OpenAI is break-glass. */
+export type AiProvider = "sarvam" | "openai";
+
+/** Whether a provider is usable in this deployment, reported by the API. */
+export interface ProviderStatus {
+  id: AiProvider;
+  /** False when no API key is set — selecting it would produce stub audits. */
+  configured: boolean;
+  default_models: { transcription: string; audit: string };
+}
+
 export interface PlatformSettings {
   setting_id: string;
+  ai_provider: AiProvider;
   transcription_model: string;
   audit_model: string;
   min_audit_duration_sec?: number;  // min recording length (s) to audit; shorter = skipped
   updated_at: string;
   updated_by: string | null;
+  /** Present on API responses; absent on a locally-constructed settings object. */
+  providers?: ProviderStatus[];
 }
 
 export const TEAMS: Team[] = ["CS", "RM", "OORP", "Escalations"];
 
-// Suggested OpenAI model ids for the Settings UI (free text also allowed).
-export const TRANSCRIPTION_MODELS = ["whisper-1", "gpt-4o-mini-transcribe", "gpt-4o-transcribe"];
-export const AUDIT_MODELS = ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-4.1", "gpt-4.1-mini"];
+// Suggested model ids for the Settings UI (free text also allowed). Scoped by
+// provider — model names are not portable, so offering OpenAI ids while Sarvam is
+// active would invite a config that fails on every call.
+export const PROVIDER_LABELS: Record<AiProvider, string> = {
+  sarvam: "Sarvam AI",
+  openai: "OpenAI",
+};
+
+export const PROVIDER_MODELS: Record<AiProvider, { transcription: string[]; audit: string[] }> = {
+  sarvam: {
+    transcription: ["saaras:v3", "saaras:v2.5"],
+    audit: ["sarvam-105b", "sarvam-30b"],
+  },
+  openai: {
+    transcription: ["gpt-4o-mini-transcribe", "gpt-4o-transcribe"],
+    audit: ["gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-mini"],
+  },
+};
 export const ROLES: Role[] = ["super_admin", "admin", "user"];
 
 export function teamClass(t: Team | null) {

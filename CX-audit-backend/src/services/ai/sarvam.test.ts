@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { __internal, extractRoleAnswer } from "./sarvam.js";
+import { __internal, extractRoleAnswer, checkTimeline } from "./sarvam.js";
 
 const { toTurns, renderTranscript, heuristicRoles, talkTimeBySpeaker, classify } = __internal;
 
@@ -155,6 +155,47 @@ describe("extractRoleAnswer", () => {
   it("returns nulls for junk rather than inventing an answer", () => {
     expect(extractRoleAnswer(null)).toEqual({ agent: null, customer: null, confidence: 0 });
     expect(extractRoleAnswer({ something_else: true }).agent).toBeNull();
+  });
+});
+
+describe("checkTimeline", () => {
+  const turn = (start: number, end: number) => ({
+    speaker_id: "0", role: null as null, start_sec: start, end_sec: end, text: "x",
+  });
+
+  it("faults on the real mis-decode we hit: 1025s of turns on a 359s file", () => {
+    // The exact defect. A 48 kHz mp3 came back stretched by 48000/16000 with a
+    // transcript of phonetic nonsense, and HTTP 200. Audio cannot contain speech
+    // after it ends, so this is the one signal that catches it every time.
+    const r = checkTimeline([turn(184, 1025)], 359);
+    expect(r.fault).toContain("1025s");
+    expect(r.fault).toContain("2.86x"); // 1025/359 — i.e. the 48000/16000 stretch
+    expect(r.fault).toContain("must not be audited");
+  });
+
+  it("passes a normal transcript that ends just about when the audio does", () => {
+    expect(checkTimeline([turn(0, 12), turn(12, 357)], 359)).toEqual({ fault: null, warning: null });
+  });
+
+  it("tolerates a small overhang from frame padding and rounding", () => {
+    // Ends 1.5s past a 60s file — encoder padding, not a decode error.
+    expect(checkTimeline([turn(0, 61.5)], 60).fault).toBeNull();
+  });
+
+  it("warns but does not fault when the timeline is short", () => {
+    // A call that ends with minutes of hold music is legitimate, so this can only
+    // ever be a hint — faulting here would block real audits.
+    const r = checkTimeline([turn(0, 100)], 600);
+    expect(r.fault).toBeNull();
+    expect(r.warning).toContain("silent tail");
+  });
+
+  it("stays silent when the duration probe failed — it will not guess", () => {
+    expect(checkTimeline([turn(0, 9999)], 0)).toEqual({ fault: null, warning: null });
+  });
+
+  it("stays silent with no turns, which is a separate handled case", () => {
+    expect(checkTimeline([], 359)).toEqual({ fault: null, warning: null });
   });
 });
 

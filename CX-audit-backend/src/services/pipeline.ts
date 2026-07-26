@@ -10,7 +10,10 @@ import {
 } from "../lib/s3.js";
 import { sendMessage, type Heartbeat } from "../lib/sqs.js";
 import { probeBufferDurationSec } from "../lib/audio.js";
-import { transcribeCall, auditTranscript, activeProvider } from "./ai/index.js";
+import { transcribeCall, auditTranscript } from "./ai/index.js";
+// Imported from the contract module rather than the dispatcher so an `instanceof`
+// check still works when tests mock the dispatcher.
+import { TranscriptValidationError } from "./ai/types.js";
 import { getUserByAgentId } from "../db/users.js";
 import { getTeam } from "../db/teams.js";
 import { createAuditIfAbsent, getAudit, updateAudit, setStatus } from "../db/audits.js";
@@ -163,7 +166,7 @@ export async function processTranscription(
   let transcriptionKey: string;
   let transcriptJsonKey: string | undefined;
   try {
-    result = await transcribeCall(buffer, meta.file_name, transcription_model, {
+    result = await transcribeCall(settings.ai_provider, buffer, meta.file_name, transcription_model, {
       // Resume rather than resubmit. Sarvam transcription is a paid job, so a
       // redelivery that re-submitted would bill the same audio twice.
       jobId: prior?.stt_job_id ?? null,
@@ -194,6 +197,15 @@ export async function processTranscription(
     // the agent's daily slots. A redelivery re-claims it (idempotently, by
     // audit_id), so a transient failure still only ever consumes one.
     if (reserved) await releaseDailySlot(meta.agent_id, day, auditId);
+    // A timeline fault means the provider returned a transcript that contradicts
+    // the audio. Terminal, not retryable: the fault is deterministic, so letting
+    // SQS redeliver would pay to transcribe the same recording again for the same
+    // wrong answer. Fail the row so it is visible, and drop the message.
+    if (err instanceof TranscriptValidationError) {
+      logger.error(`${auditId} failed transcript validation: ${err.message}`);
+      await setStatus(auditId, "failed", err.message);
+      return;
+    }
     throw err;
   }
 
@@ -203,7 +215,7 @@ export async function processTranscription(
     transcription_key: transcriptionKey,
     transcription_url: s3Url(infra.output_bucket, transcriptionKey),
     transcribed_at: new Date().toISOString(),
-    ai_provider: activeProvider,
+    ai_provider: settings.ai_provider,
     transcript_json_key: transcriptJsonKey,
     speaker_roles: result.roles,
     talk_time_sec: result.talkTimeSec,
@@ -260,7 +272,24 @@ export async function processAudit(message: AuditQueueMessage): Promise<void> {
 
   await setStatus(audit_id, "auditing");
   const transcript = await getTranscription(transcription_key, infra.output_bucket);
-  const { audit_model } = await getModelSettingsCached();
+  // An empty transcript is not scoreable, and the auditor will not tell us so — it
+  // will return plausible criterion scores for a blank call, which then land on a
+  // real agent's record. The provider rejects this case too; this second check
+  // covers every path into the audit stage, including older rows and any future
+  // provider that returns nothing without saying so.
+  if (!transcript.trim()) {
+    await setStatus(
+      audit_id,
+      "failed",
+      `Transcript at ${transcription_key} is empty — refusing to score a blank call. Re-ingest the recording to retry.`
+    );
+    logger.error(`${audit_id}: empty transcript at ${transcription_key}; not auditing`);
+    return;
+  }
+  // Read fresh rather than trusting the provider stamped at transcription time:
+  // the transcript is just text, so auditing it with whatever provider is current
+  // is correct, and it means a switch takes effect on the audit stage immediately.
+  const { audit_model, ai_provider } = await getModelSettingsCached();
 
   // Score against the primary rubric (the team row) + every active additional
   // rubric for the team. Each produces its own RubricResult.
@@ -272,7 +301,7 @@ export async function processAudit(message: AuditQueueMessage): Promise<void> {
 
   const rubricResults: RubricResult[] = [];
   for (const s of scorables) {
-    const r = await auditTranscript(transcript, s.spec, { audit_id, agent_id, team }, audit_model);
+    const r = await auditTranscript(ai_provider, transcript, s.spec, { audit_id, agent_id, team }, audit_model);
     rubricResults.push({
       rubric_id: s.rubric_id,
       rubric_name: s.spec.name,

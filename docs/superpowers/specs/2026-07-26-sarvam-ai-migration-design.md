@@ -790,6 +790,17 @@ clean markdown; `llms.txt` indexes the corpus).
   16 kHz transcribed perfectly. Every upload is therefore transcoded to 16 kHz
   mono WAV first (`normalizeForAsr`). Our recordings are 8 kHz, below anything
   tested here, so this guard matters for them too.
+- **The mis-decode has more than one form.** Re-running the 48 kHz audio with
+  normalisation deliberately disabled did *not* reproduce the stretched timeline —
+  it returned a completed job with **zero turns and an empty transcript**, again
+  with no error. So a timeline check alone is not sufficient: an empty transcript
+  is now rejected by the provider and refused by the audit stage, because an
+  auditor handed a blank transcript returns plausible scores rather than
+  complaining. See `docs/RCA-2026-07-26-sarvam-integration-defects.md`.
+- **`npm run verify:sarvam -- <audio>`** runs the real `transcribeCall` against
+  real audio and asserts nine contract expectations against locally-known ground
+  truth. Run it before shipping any provider or model config change; a 40-second
+  clip costs about ₹0.50.
 - **Rate limits:** Starter 60/min, Pro 200/min, Business 1,000/min, Enterprise
   custom. New accounts get ₹100 of free credits.
 - **Batch webhooks:** `callback: {url, auth_token}`; Sarvam sends the token in
