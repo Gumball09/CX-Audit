@@ -11,6 +11,8 @@
 import {
   DynamoDBClient,
   CreateTableCommand,
+  DescribeTimeToLiveCommand,
+  UpdateTimeToLiveCommand,
   type CreateTableCommandInput,
 } from "@aws-sdk/client-dynamodb";
 import {
@@ -200,7 +202,22 @@ const tables: CreateTableCommandInput[] = [
       { AttributeName: "bucket", KeyType: "RANGE" },
     ],
   },
+  {
+    // Per-agent, per-day audit slot counters backing the team `daily_audit_cap`.
+    // Key is `<agent_id>#<YYYY-MM-DD>`; slots are claimed with a conditional
+    // write so concurrent workers can't overshoot the cap. Rows self-expire via
+    // the `expires_at` TTL a week after the call's date.
+    TableName: env.DDB_QUOTA_TABLE,
+    BillingMode: PAY,
+    AttributeDefinitions: [{ AttributeName: "quota_id", AttributeType: S }],
+    KeySchema: [{ AttributeName: "quota_id", KeyType: "HASH" }],
+  },
 ];
+
+/** Tables whose rows self-expire, mapped to their TTL attribute. */
+const ttlAttributes: Record<string, string> = {
+  [env.DDB_QUOTA_TABLE]: "expires_at",
+};
 
 async function createTables() {
   for (const table of tables) {
@@ -212,21 +229,50 @@ async function createTables() {
       else throw err;
     }
   }
+  await enableTtls();
 }
 
-async function ensureQueue(name: string): Promise<string> {
+/** Turn on TTL for tables that self-expire. Idempotent and safe to re-run. */
+async function enableTtls() {
+  for (const [tableName, attributeName] of Object.entries(ttlAttributes)) {
+    try {
+      const current = await ddb.send(new DescribeTimeToLiveCommand({ TableName: tableName }));
+      const status = current.TimeToLiveDescription?.TimeToLiveStatus;
+      if (status === "ENABLED" || status === "ENABLING") {
+        console.log(`• TTL already enabled on ${tableName}`);
+        continue;
+      }
+      await ddb.send(
+        new UpdateTimeToLiveCommand({
+          TableName: tableName,
+          TimeToLiveSpecification: { Enabled: true, AttributeName: attributeName },
+        })
+      );
+      console.log(`✓ enabled TTL on ${tableName} (${attributeName})`);
+    } catch (err: any) {
+      // A brand-new table can still be CREATING; TTL can be enabled later.
+      console.log(`! could not enable TTL on ${tableName}: ${err.name ?? err.message}. Re-run once the table is ACTIVE.`);
+    }
+  }
+}
+
+/**
+ * Returns the queue URL and whether we just created it. The flag matters: an
+ * existing queue's attributes are left alone (see `createQueues`).
+ */
+async function ensureQueue(name: string): Promise<{ url: string; created: boolean }> {
   try {
     const { QueueUrl } = await sqs.send(new GetQueueUrlCommand({ QueueName: name }));
     if (QueueUrl) {
       console.log(`• queue ${name} already exists`);
-      return QueueUrl;
+      return { url: QueueUrl, created: false };
     }
   } catch {
     /* not found — create below */
   }
   const { QueueUrl } = await sqs.send(new CreateQueueCommand({ QueueName: name }));
   console.log(`✓ created queue ${name}`);
-  return QueueUrl!;
+  return { url: QueueUrl!, created: true };
 }
 
 async function queueArn(url: string): Promise<string> {
@@ -238,19 +284,35 @@ async function queueArn(url: string): Promise<string> {
 
 async function createQueues() {
   for (const base of ["cx-transcription-queue", "cx-audit-queue"]) {
-    const dlqUrl = await ensureQueue(`${base}-dlq`);
-    const dlqArn = await queueArn(dlqUrl);
-    const mainUrl = await ensureQueue(base);
-    await sqs.send(
-      new SetQueueAttributesCommand({
-        QueueUrl: mainUrl,
-        Attributes: {
-          VisibilityTimeout: "300", // 5 min — long enough for a Whisper/GPT call
-          RedrivePolicy: JSON.stringify({ deadLetterTargetArn: dlqArn, maxReceiveCount: env.SQS_MAX_RECEIVE_COUNT }),
-        },
-      })
-    );
-    console.log(`  → ${base} URL: ${mainUrl}`);
+    const dlq = await ensureQueue(`${base}-dlq`);
+    const dlqArn = await queueArn(dlq.url);
+    const main = await ensureQueue(base);
+
+    // Only stamp attributes onto a queue we just created. Re-running this script
+    // used to overwrite them unconditionally, which silently reverted tuning
+    // done in the live environment — prod's transcription queue had been raised
+    // to VisibilityTimeout 900 for long recordings, and a re-run would have
+    // knocked it back to 300 with no warning.
+    if (main.created) {
+      await sqs.send(
+        new SetQueueAttributesCommand({
+          QueueUrl: main.url,
+          Attributes: {
+            VisibilityTimeout: "900", // long enough for a slow transcription
+            RedrivePolicy: JSON.stringify({ deadLetterTargetArn: dlqArn, maxReceiveCount: env.SQS_MAX_RECEIVE_COUNT }),
+          },
+        })
+      );
+    } else {
+      const { Attributes } = await sqs.send(
+        new GetQueueAttributesCommand({ QueueUrl: main.url, AttributeNames: ["VisibilityTimeout", "RedrivePolicy"] })
+      );
+      console.log(
+        `  • left ${base} attributes untouched (VisibilityTimeout=${Attributes?.VisibilityTimeout}` +
+          `${Attributes?.RedrivePolicy ? "" : ", NO redrive policy — set one manually"})`
+      );
+    }
+    console.log(`  → ${base} URL: ${main.url}`);
   }
 }
 

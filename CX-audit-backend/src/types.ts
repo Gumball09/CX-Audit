@@ -88,6 +88,7 @@ export interface TeamRubric {
   scale_max?: number;                  // max score per criterion (default 100)
   flag_threshold: number;              // overall score below this => flagged (default 70)
   critical_criterion_threshold: number; // any criterion below this => flagged (default 60)
+  daily_audit_cap?: number;            // max calls audited per agent per day (0/unset = unlimited)
   infra?: TeamInfra;                   // per-team buckets/queues/tuning (env fallback)
   active?: boolean;                    // soft-disable without deleting (default true)
   created_at?: string;
@@ -201,6 +202,12 @@ export interface AuditRecord {
   duration_sec?: number;     // recording length in seconds (probed at transcription)
 
   status: AuditStatus;
+  // When status is "skipped", why: too short (< min audit duration), the agent's
+  // daily audit cap was already reached, or the agent has no team mapping so no
+  // rubric can be selected. Distinguishes the skip causes for reporting (all are
+  // hidden from the logs view). `no_team` is recoverable — map the agent and
+  // reprocess.
+  skip_reason?: "too_short" | "daily_cap" | "no_team";
   error?: string;
 
   transcription_key?: string;
@@ -311,6 +318,9 @@ export interface PlatformSettings {
   setting_id: string;          // singleton partition key, always "global"
   transcription_model: string;
   audit_model: string;
+  // Minimum recording length (seconds) to audit; shorter calls are skipped
+  // before any transcription/audit cost. Falls back to MIN_CALL_DURATION_SECONDS.
+  min_audit_duration_sec?: number;
   updated_at: string;
   updated_by: string | null;
 }

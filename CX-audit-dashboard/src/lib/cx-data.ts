@@ -47,6 +47,7 @@ export interface TeamRubric {
   scale_max?: number;          // max score per criterion (default 100)
   flag_threshold: number;
   critical_criterion_threshold: number;
+  daily_audit_cap?: number;    // max calls audited per agent per day (0/unset = unlimited)
   infra?: TeamInfra;           // per-team buckets/queues/tuning (super_admin)
   active?: boolean;
   created_at?: string;
@@ -167,6 +168,7 @@ export interface Audit {
   team: Team | null;
   duration_sec?: number;
   status: AuditStatus;
+  skip_reason?: "too_short" | "daily_cap" | "no_team";
   error?: string;
   transcription_key?: string;
   transcription_url?: string;
@@ -292,6 +294,7 @@ export interface PlatformSettings {
   setting_id: string;
   transcription_model: string;
   audit_model: string;
+  min_audit_duration_sec?: number;  // min recording length (s) to audit; shorter = skipped
   updated_at: string;
   updated_by: string | null;
 }

@@ -21,9 +21,10 @@ settingsRouter.get("/", requireRole("admin", "super_admin"), async (_req, res) =
  * within ~60s as the workers' settings cache refreshes.
  */
 settingsRouter.patch("/", requireRole("super_admin"), async (req, res) => {
-  const { transcription_model, audit_model } = req.body as {
+  const { transcription_model, audit_model, min_audit_duration_sec } = req.body as {
     transcription_model?: string;
     audit_model?: string;
+    min_audit_duration_sec?: number;
   };
 
   if (transcription_model !== undefined && !validModel(transcription_model)) {
@@ -32,14 +33,22 @@ settingsRouter.patch("/", requireRole("super_admin"), async (req, res) => {
   if (audit_model !== undefined && !validModel(audit_model)) {
     return res.status(400).json({ message: "audit_model must be a non-empty model id with no spaces." });
   }
-  if (transcription_model === undefined && audit_model === undefined) {
-    return res.status(400).json({ message: "Provide transcription_model and/or audit_model." });
+  if (
+    min_audit_duration_sec !== undefined &&
+    (!Number.isFinite(min_audit_duration_sec) || min_audit_duration_sec < 0 || min_audit_duration_sec > 86400)
+  ) {
+    return res.status(400).json({ message: "min_audit_duration_sec must be a number between 0 and 86400 seconds." });
+  }
+  if (transcription_model === undefined && audit_model === undefined && min_audit_duration_sec === undefined) {
+    return res.status(400).json({ message: "Provide transcription_model, audit_model, and/or min_audit_duration_sec." });
   }
 
   const updated = await putSettings(
     {
       transcription_model: transcription_model?.trim(),
       audit_model: audit_model?.trim(),
+      min_audit_duration_sec:
+        min_audit_duration_sec !== undefined ? Math.round(min_audit_duration_sec) : undefined,
     },
     req.user!.user_id
   );

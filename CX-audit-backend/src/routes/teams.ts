@@ -12,6 +12,27 @@ export const teamsRouter = Router();
 // the DynamoDB key and the value stored on users/audits, so keep it URL-safe.
 const TEAM_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/;
 
+/** Cap applied to a team that doesn't specify one. Deliberately not unlimited. */
+export const DEFAULT_DAILY_AUDIT_CAP = 3;
+
+export const CAP_ERROR = "daily_audit_cap must be a non-negative integer (0 = unlimited).";
+
+/**
+ * Parse the daily audit cap. `undefined` means absent (leave unchanged);
+ * `"invalid"` means the caller must reject with a 400.
+ *
+ * It deliberately does NOT coerce garbage to `undefined` the way the other
+ * sanitizers do. This is a spend control: treating a typo as "unlimited" fails
+ * in the expensive direction, and silently, which is how the cap came to be
+ * unset on every team in the first place.
+ */
+export function parseCap(v: unknown): number | undefined | "invalid" {
+  if (v === undefined || v === null || v === "") return undefined;
+  const n = Math.floor(Number(v));
+  if (!Number.isFinite(n) || n < 0) return "invalid";
+  return n;
+}
+
 /** Coerce/validate the optional per-team infra block. Returns undefined if absent. */
 function sanitizeInfra(raw: unknown): TeamInfra | undefined {
   if (raw === undefined || raw === null) return undefined;
@@ -57,6 +78,8 @@ teamsRouter.post("/", requireRole("super_admin"), async (req, res) => {
     const v = validateCriteria(b.criteria);
     if (!v.valid) return res.status(400).json({ message: "Validation failed", errors: v.errors });
   }
+  const cap = parseCap(b.daily_audit_cap);
+  if (cap === "invalid") return res.status(400).json({ message: CAP_ERROR });
 
   const now = new Date().toISOString();
   const team: TeamRubric = {
@@ -68,6 +91,8 @@ teamsRouter.post("/", requireRole("super_admin"), async (req, res) => {
     scale_max: b.scale_max ?? 100,
     flag_threshold: b.flag_threshold ?? 70,
     critical_criterion_threshold: b.critical_criterion_threshold ?? 60,
+    // A new team is capped by default — an uncapped team is an open-ended bill.
+    daily_audit_cap: cap ?? DEFAULT_DAILY_AUDIT_CAP,
     infra: sanitizeInfra(b.infra),
     active: true,
     created_at: now,
@@ -105,12 +130,15 @@ teamsRouter.patch("/:id", requireRole("admin", "super_admin"), async (req, res) 
     const result = validateCriteria(patch.criteria);
     if (!result.valid) return res.status(400).json({ message: "Validation failed", errors: result.errors });
   }
+  const cap = parseCap(patch.daily_audit_cap);
+  if (cap === "invalid") return res.status(400).json({ message: CAP_ERROR });
 
   const updated: TeamRubric = {
     ...existing,
     ...patch,
     // never let these be overwritten by the patch body
     team_id: id,
+    daily_audit_cap: cap ?? existing.daily_audit_cap,
     infra: patch.infra !== undefined ? sanitizeInfra(patch.infra) : existing.infra,
     active: patch.active !== undefined ? !!patch.active : existing.active,
     created_at: existing.created_at,

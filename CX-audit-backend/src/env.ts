@@ -94,10 +94,13 @@ export const env = {
   // of an earlier one (collapses paraphrased "restart" loops). 1 = exact-only.
   TRANSCRIPTION_NEARDUP_SIMILARITY: Number(getEnv("TRANSCRIPTION_NEARDUP_SIMILARITY", false, "0.8")),
 
-  // Recordings shorter than this (seconds) are marked `skipped` and never
-  // transcribed/audited — they're too short to score meaningfully. 0 disables
-  // the gate. If the duration can't be probed, the call is audited normally.
-  MIN_CALL_DURATION_SECONDS: Number(getEnv("MIN_CALL_DURATION_SECONDS", false, "45")),
+  // Minimum recording length (seconds) to audit; shorter calls are marked
+  // `skipped` and never transcribed/audited. This is the FALLBACK default — the
+  // effective value is the runtime-configurable `min_audit_duration_sec` in
+  // platform settings (super_admin editable). Default 600 = only audit calls
+  // longer than 10 min. 0 disables the gate. Unprobeable (0s) duration is
+  // audited normally (fail open).
+  MIN_CALL_DURATION_SECONDS: Number(getEnv("MIN_CALL_DURATION_SECONDS", false, "600")),
 
   // ---- Sentry (error/alert reporting) ----
   // Leave SENTRY_DSN blank to disable reporting entirely (local/stub mode).
@@ -120,6 +123,10 @@ export const env = {
   DDB_SUGGESTIONS_TABLE: getEnv("DDB_SUGGESTIONS_TABLE", false, "cx_suggestions"),
   // Per-role daily/monthly sign-in counters (the DAU/MAU dashboard).
   DDB_LOGIN_STATS_TABLE: getEnv("DDB_LOGIN_STATS_TABLE", false, "cx_login_stats"),
+  // Per-agent, per-day audit slot counters backing the team `daily_audit_cap`.
+  // Rows are claimed with a conditional write so concurrent workers cannot
+  // overshoot the cap, and expire via TTL a week after the call's date.
+  DDB_QUOTA_TABLE: getEnv("DDB_QUOTA_TABLE", false, "cx_audit_quota"),
 };
 
 /**

@@ -1,4 +1,3 @@
-import { env } from "../env.js";
 import { logger } from "../logger.js";
 import { resolveRecordingMeta, buildAuditId } from "../lib/filename.js";
 import {
@@ -14,6 +13,8 @@ import { transcribeAudio, auditTranscript } from "./openai.js";
 import { getUserByAgentId } from "../db/users.js";
 import { getTeam } from "../db/teams.js";
 import { createAuditIfAbsent, getAudit, updateAudit, setStatus } from "../db/audits.js";
+import { reserveDailySlot, releaseDailySlot } from "../db/quota.js";
+import { recordSkip } from "../db/skipStats.js";
 import { listRubricsByTeam } from "../db/rubrics.js";
 import { recordAuditPerformance } from "../db/performance.js";
 import { getModelSettingsCached } from "../db/settings.js";
@@ -43,11 +44,79 @@ export async function processTranscription(recordingKey: string, queueTeamId: st
   // teams on the global queue.
   const agentUser = await getUserByAgentId(meta.agent_id);
   const team = queueTeamId ?? agentUser?.team ?? null;
-  if (!team) {
-    logger.warn(`No team mapping for agent ${meta.agent_id} (audit ${auditId})`);
-  }
   const infra = await resolveTeamInfra(queueTeamId);
 
+  // Idempotency read. The conditional create below is what actually serializes
+  // concurrent first-time deliveries; this earlier read just avoids re-downloading
+  // and re-probing a recording that is already done. `failed` and `queued` stay
+  // re-processable.
+  const prior = await getAudit(auditId);
+  if (prior && prior.status !== "failed" && prior.status !== "queued") {
+    logger.info(`Skipping ${auditId} — already processed (status=${prior.status})`);
+    return;
+  }
+
+  const buffer = await getRecordingBuffer(recordingKey, infra.recording_bucket);
+  const durationSec = await probeBufferDurationSec(buffer, meta.file_name);
+  const settings = await getModelSettingsCached();
+  const day = meta.call_datetime.slice(0, 10); // YYYY-MM-DD (the call's own date)
+
+  // ---- Gates -------------------------------------------------------------
+  // All three run BEFORE the audit row is created, so a rejected call leaves no
+  // row behind: the logs view stays clean and the table only ever holds calls we
+  // actually spend money on. Each skip bumps a per-day tally instead, so the
+  // volume controls stay measurable without one row per rejected call.
+  //
+  // Nothing below this point has incurred AI cost yet — only an S3 download and
+  // a local ffprobe.
+
+  // Gate 1 — call length: recordings shorter than the configured minimum audit
+  // duration are skipped before incurring any transcription/audit cost. Fail
+  // open — a 0 (unprobeable) duration is NOT skipped. The threshold is the
+  // runtime-configurable `min_audit_duration_sec` (env fallback).
+  const minDuration = settings.min_audit_duration_sec;
+  if (minDuration > 0 && durationSec > 0 && durationSec < minDuration) {
+    await recordSkip("too_short", day, durationSec);
+    logger.info(`Skipping ${auditId} — call too short (${durationSec.toFixed(1)}s < ${minDuration}s)`);
+    return;
+  }
+
+  // Gate 2 — team mapping. Without a team there is no rubric, so the audit can
+  // never complete: transcribing it would spend money on a call that is
+  // guaranteed to fail at stage 2. Skip before that spend. Recoverable — map the
+  // agent and re-ingest the recording. It also has to run BEFORE the cap gate,
+  // because the cap is keyed on the team and would otherwise be bypassed
+  // entirely for exactly these calls.
+  if (!team) {
+    await recordSkip("no_team", day, durationSec);
+    logger.warn(
+      `Skipping ${auditId} — no team mapping for agent ${meta.agent_id}; map the agent and re-ingest to audit it`
+    );
+    return;
+  }
+
+  // Gate 3 — per-agent daily audit cap (per-team, admin-set). `reserveDailySlot`
+  // claims a slot with a single conditional write, so concurrent messages for the
+  // same agent/day cannot exceed the cap. The reservation is keyed on `audit_id`,
+  // making a redelivery of the same recording reuse its slot rather than consume
+  // a second one.
+  const teamRow = await getTeam(team);
+  const cap = teamRow?.daily_audit_cap ?? 0;
+  let reserved = false;
+  if (cap > 0) {
+    const slot = await reserveDailySlot(meta.agent_id, day, cap, auditId);
+    if (!slot.granted) {
+      await recordSkip("daily_cap", day, durationSec);
+      logger.info(`Skipping ${auditId} — daily cap reached for agent ${meta.agent_id} (${slot.used}/${cap} on ${day})`);
+      return;
+    }
+    reserved = true;
+  }
+
+  // ---- Past the gates: this call is going to be transcribed, so it earns a row.
+  // The conditional create is what serializes two concurrent first-time
+  // deliveries of the same recording — the loser backs off here rather than
+  // paying to transcribe it twice.
   const now = new Date().toISOString();
   const record: AuditRecord = {
     audit_id: auditId,
@@ -59,41 +128,37 @@ export async function processTranscription(recordingKey: string, queueTeamId: st
     customer_number: meta.customer_number,
     call_datetime: meta.call_datetime,
     team,
-    status: "queued",
+    status: "transcribing",
+    duration_sec: durationSec > 0 ? Math.round(durationSec) : undefined,
     created_at: now,
     updated_at: now,
   };
-
   const created = await createAuditIfAbsent(record);
   if (!created) {
     const existing = await getAudit(auditId);
-    // `skipped` stays re-processable so lowering MIN_CALL_DURATION_SECONDS and
-    // reprocessing can re-evaluate a previously-too-short call.
-    if (existing && existing.status !== "failed" && existing.status !== "queued" && existing.status !== "skipped") {
-      logger.info(`Skipping ${auditId} — already processed (status=${existing.status})`);
+    if (existing && existing.status !== "failed" && existing.status !== "queued") {
+      logger.info(`Skipping ${auditId} — another worker already claimed it (status=${existing.status})`);
+      // Deliberately NOT releasing the slot: reservations are keyed on audit_id,
+      // so both workers hold the *same* slot. The winner is transcribing under
+      // it, and releasing here would free the slot out from under them.
       return;
     }
-    logger.info(`Re-processing ${auditId} (previous status=${existing?.status})`);
+    await setStatus(auditId, "transcribing");
   }
 
-  await setStatus(auditId, "transcribing");
-  const buffer = await getRecordingBuffer(recordingKey, infra.recording_bucket);
-
-  // Gate on call length: recordings shorter than the configured minimum are too
-  // short to score, so mark them `skipped` and stop before incurring any
-  // transcription/audit cost. Fail open — a 0 (unprobeable) duration is NOT
-  // skipped. `duration_sec` is also stored for display on longer calls.
-  const durationSec = await probeBufferDurationSec(buffer, meta.file_name);
-  const minDuration = env.MIN_CALL_DURATION_SECONDS;
-  if (minDuration > 0 && durationSec > 0 && durationSec < minDuration) {
-    await updateAudit(auditId, { status: "skipped", duration_sec: Math.round(durationSec) });
-    logger.info(`Skipping ${auditId} — call too short (${durationSec.toFixed(1)}s < ${minDuration}s)`);
-    return;
+  const { transcription_model } = settings;
+  let transcript: string;
+  let transcriptionKey: string;
+  try {
+    transcript = await transcribeAudio(buffer, meta.file_name, transcription_model);
+    transcriptionKey = await saveTranscription(transcript, auditId, infra.output_bucket);
+  } catch (err) {
+    // Hand the slot back so a permanently broken recording doesn't hold one of
+    // the agent's daily slots. A redelivery re-claims it (idempotently, by
+    // audit_id), so a transient failure still only ever consumes one.
+    if (reserved) await releaseDailySlot(meta.agent_id, day, auditId);
+    throw err;
   }
-
-  const { transcription_model } = await getModelSettingsCached();
-  const transcript = await transcribeAudio(buffer, meta.file_name, transcription_model);
-  const transcriptionKey = await saveTranscription(transcript, auditId, infra.output_bucket);
 
   await updateAudit(auditId, {
     status: "transcribed",

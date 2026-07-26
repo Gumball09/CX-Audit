@@ -49,6 +49,9 @@ auditsRouter.get("/", async (req, res) => {
   const page = await listAudits(scope, {
     flagged: flagged === "true" ? true : undefined,
     status: status || undefined,
+    // Hide skipped rows from the logs by default; an explicit ?status= (e.g.
+    // status=skipped) overrides this to show them.
+    excludeSkipped: status ? undefined : true,
     from: from || undefined,
     to: to || undefined,
     limit: limit ? Number(limit) : undefined,
