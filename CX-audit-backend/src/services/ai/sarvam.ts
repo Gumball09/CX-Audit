@@ -772,7 +772,13 @@ export async function auditTranscript(
   const res = await chat.chat.completions.create({
     model,
     response_format: { type: "json_object" },
-    temperature: 0.3,
+    // temperature 0, not 0.3. At 0.3 the same transcript against the same rubric
+    // scored 69 / 55 / 39 overall across three runs — a 30-point spread, with one
+    // criterion swinging 85/85/20. An agent's score should not depend on sampling
+    // luck, and whether a call trips the flag threshold least of all. Scoring
+    // against a fixed rubric is extraction, not composition; there is nothing here
+    // that benefits from creative variation.
+    temperature: 0,
     max_tokens: AUDIT_MAX_TOKENS,
     ...({ reasoning_effort: null } as Record<string, unknown>),
     messages: [

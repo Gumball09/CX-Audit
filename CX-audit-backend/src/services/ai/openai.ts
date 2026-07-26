@@ -219,7 +219,11 @@ export async function auditTranscript(
   const res = await openai.chat.completions.create({
     model,
     response_format: { type: "json_object" },
-    temperature: 0.3,
+    // temperature 0 — see the note in sarvam.ts. Measured on real transcripts, 0.3
+    // gave a 30-point spread in the overall score across identical runs. Scoring
+    // against a fixed rubric is extraction, not composition. Kept in step with the
+    // Sarvam path so switching provider does not change scoring behaviour.
+    temperature: 0,
     max_tokens: 900,
     messages: [
       { role: "system", content: rubric.system_prompt },
