@@ -12,6 +12,7 @@ import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ChevronDown, ChevronRight, Lightbulb, Minus, Plus, Sparkles, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { onGuideSignal } from "@/lib/guideBus";
 
 // The per-team infra fields, with the env var they fall back to when left blank.
 const INFRA_FIELDS: { key: keyof TeamInfra; label: string; numeric?: boolean }[] = [
@@ -44,6 +45,13 @@ export function AuditPromptsView({ user }: { user: User }) {
   useEffect(() => {
     if (selected && selected.team_id !== draft?.team_id) setDraft(selected);
   }, [selected, draft?.team_id]);
+
+  // The guided tour needs to point at controls inside the new-team form, which
+  // isn't rendered until "New" is clicked. Open it on request.
+  useEffect(
+    () => onGuideSignal((s) => { if (s === "open-new-team-form" && isSuper) setCreating(true); }),
+    [isSuper]
+  );
 
   const canEdit = (teamId: Team) => isSuper || (user.role === "admin" && user.team === teamId);
   const editable = draft ? canEdit(draft.team_id) : false;
@@ -104,21 +112,21 @@ export function AuditPromptsView({ user }: { user: User }) {
 
   return (
     <div className="flex h-[calc(100vh-3.5rem)]">
-      <aside className="w-[300px] shrink-0 border-r border-border bg-surface flex flex-col">
+      <aside data-guide="teams-panel" className="w-[300px] shrink-0 border-r border-border bg-surface flex flex-col">
         <div className="p-4 border-b border-border flex items-center justify-between">
           <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">Teams</span>
           {isSuper && (
-            <button onClick={() => setCreating((v) => !v)} className="font-mono text-[10px] text-primary hover:underline flex items-center gap-1">
+            <button data-guide="teams-new" onClick={() => setCreating((v) => !v)} className="font-mono text-[10px] text-primary hover:underline flex items-center gap-1">
               <Plus className="h-3 w-3" /> New
             </button>
           )}
         </div>
         {creating && isSuper && (
-          <div className="p-3 border-b border-border space-y-2 bg-surface-2">
-            <Input value={newId} onChange={(e) => setNewId(e.target.value)} placeholder="team id (e.g. Sales)" className="bg-background border-border font-mono text-xs h-8" />
-            <Input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="display name" className="bg-background border-border text-xs h-8" />
+          <div data-guide="teams-new-form" className="p-3 border-b border-border space-y-2 bg-surface-2">
+            <Input data-guide="teams-new-id" value={newId} onChange={(e) => setNewId(e.target.value)} placeholder="team id (e.g. Sales)" className="bg-background border-border font-mono text-xs h-8" />
+            <Input data-guide="teams-new-name" value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="display name" className="bg-background border-border text-xs h-8" />
             <div className="flex gap-2">
-              <Button onClick={() => createMut.mutate()} disabled={!newId.trim() || createMut.isPending} className="h-7 bg-primary text-primary-foreground hover:bg-primary/90 text-xs flex-1">
+              <Button data-guide="teams-new-create" onClick={() => createMut.mutate()} disabled={!newId.trim() || createMut.isPending} className="h-7 bg-primary text-primary-foreground hover:bg-primary/90 text-xs flex-1">
                 {createMut.isPending ? "Creating…" : "Create"}
               </Button>
               <Button variant="ghost" onClick={() => setCreating(false)} className="h-7 border border-border text-xs">Cancel</Button>
@@ -126,7 +134,7 @@ export function AuditPromptsView({ user }: { user: User }) {
             <p className="font-mono text-[9px] text-muted-foreground/70">Slug: letters, digits, dash, underscore. Set buckets/queues after, in Infrastructure.</p>
           </div>
         )}
-        <div className="flex-1 overflow-auto">
+        <div data-guide="teams-list" className="flex-1 overflow-auto">
           {isLoading && <div className="p-4 font-mono text-xs text-muted-foreground">Loading…</div>}
           {teams.map((t) => (
             <button
@@ -156,38 +164,38 @@ export function AuditPromptsView({ user }: { user: User }) {
         ) : (
           <div className="p-6 space-y-6 max-w-3xl">
             {!editable && (
-              <div className="border border-border bg-surface px-3 py-2 rounded-sm font-mono text-xs text-muted-foreground">
+              <div data-guide="rubric-readonly-banner" className="border border-border bg-surface px-3 py-2 rounded-sm font-mono text-xs text-muted-foreground">
                 Read-only — you can only edit your own team's rubric.
               </div>
             )}
-            {error && <div className="border border-destructive/40 bg-destructive/10 text-destructive px-3 py-2 rounded-sm font-mono text-xs">{error}</div>}
+            {error && <div data-guide="rubric-error" className="border border-destructive/40 bg-destructive/10 text-destructive px-3 py-2 rounded-sm font-mono text-xs">{error}</div>}
 
-            <div>
+            <div data-guide="rubric-name">
               <label className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">Rubric Name</label>
               <Input value={draft.name} disabled={!editable} onChange={(e) => setDraft({ ...draft, name: e.target.value })} className="mt-1 bg-surface border-border" />
             </div>
 
-            <div>
+            <div data-guide="rubric-description">
               <label className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">Description</label>
               <Input value={draft.description} disabled={!editable} onChange={(e) => setDraft({ ...draft, description: e.target.value })} className="mt-1 bg-surface border-border" />
             </div>
 
             <div className="flex gap-4">
-              <div className="flex-1">
+              <div data-guide="rubric-scale-max" className="flex-1">
                 <label className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">Score scale (max)</label>
                 <Input type="number" value={draft.scale_max ?? 100} disabled={!editable} onChange={(e) => setDraft({ ...draft, scale_max: Number(e.target.value) })} className="mt-1 bg-surface border-border font-mono w-28" />
               </div>
-              <div className="flex-1">
+              <div data-guide="rubric-flag-threshold" className="flex-1">
                 <label className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">Flag threshold (overall &lt;)</label>
                 <Input type="number" value={draft.flag_threshold} disabled={!editable} onChange={(e) => setDraft({ ...draft, flag_threshold: Number(e.target.value) })} className="mt-1 bg-surface border-border font-mono w-28" />
               </div>
-              <div className="flex-1">
+              <div data-guide="rubric-critical-threshold" className="flex-1">
                 <label className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">Critical criterion (&lt;)</label>
                 <Input type="number" value={draft.critical_criterion_threshold} disabled={!editable} onChange={(e) => setDraft({ ...draft, critical_criterion_threshold: Number(e.target.value) })} className="mt-1 bg-surface border-border font-mono w-28" />
               </div>
             </div>
 
-            <div>
+            <div data-guide="rubric-daily-cap">
               <label className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">Calls audited per member / day</label>
               <Input
                 type="number"
@@ -201,29 +209,32 @@ export function AuditPromptsView({ user }: { user: User }) {
               <p className="font-mono text-[10px] text-muted-foreground/70 mt-1">Max calls audited per agent each day for this team. 0 = unlimited. Extras are skipped before transcription.</p>
             </div>
 
-            <div>
+            <div data-guide="criteria-section">
               <div className="flex items-center justify-between mb-2">
                 <label className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">Scoring Criteria</label>
-                <span className="font-mono text-[10px] text-muted-foreground">weights are relative · normalized automatically</span>
+                <span data-guide="criteria-note" className="font-mono text-[10px] text-muted-foreground">weights are relative · normalized automatically</span>
               </div>
               <div className="space-y-2">
                 {draft.criteria.map((c, i) => {
                   const critErr = criterionError(c);
+                  // Only the first card carries guide anchors — a tour needs one
+                  // representative example, not one step per criterion.
+                  const g = (name: string) => (i === 0 ? { "data-guide": name } : {});
                   return (
-                  <div key={i} className="border border-border bg-surface rounded-md p-3">
+                  <div key={i} {...g("criterion-card")} className="border border-border bg-surface rounded-md p-3">
                     <div className="flex gap-2 items-start">
-                      <Input value={c.name} disabled={!editable} onChange={(e) => updateCriterion(i, { name: e.target.value })} placeholder="Criterion name" className="bg-background border-border flex-1" />
-                      <div className="flex flex-col items-center">
+                      <Input {...g("criterion-name")} value={c.name} disabled={!editable} onChange={(e) => updateCriterion(i, { name: e.target.value })} placeholder="Criterion name" className="bg-background border-border flex-1" />
+                      <div {...g("criterion-weight")} className="flex flex-col items-center">
                         <Input type="number" value={c.weight ?? ""} disabled={!editable} onChange={(e) => updateCriterion(i, { weight: e.target.value === "" ? undefined : Number(e.target.value) })} placeholder="wt" className="bg-background border-border w-16 font-mono" />
                         <span className="font-mono text-[9px] text-muted-foreground mt-0.5">= {sharePct(c.weight)}%</span>
                       </div>
-                      <button disabled={!editable} onClick={() => removeCriterion(i)} aria-label="Remove criterion" className="p-2 rounded-sm hover:bg-destructive/10 text-muted-foreground hover:text-destructive disabled:opacity-30">
+                      <button {...g("criterion-remove")} disabled={!editable} onClick={() => removeCriterion(i)} aria-label="Remove criterion" className="p-2 rounded-sm hover:bg-destructive/10 text-muted-foreground hover:text-destructive disabled:opacity-30">
                         <Minus className="h-3.5 w-3.5" />
                       </button>
                     </div>
-                    <Textarea value={c.description} disabled={!editable} onChange={(e) => updateCriterion(i, { description: e.target.value })} placeholder="Instruction for the LLM…" className="mt-2 bg-background border-border text-xs" rows={2} />
-                    <Textarea value={c.guidance ?? ""} disabled={!editable} onChange={(e) => updateCriterion(i, { guidance: e.target.value || undefined })} placeholder="Optional extra guidance / examples for the auditor…" className="mt-2 bg-background border-border text-xs" rows={2} />
-                    <div className="mt-2 flex items-center gap-2">
+                    <Textarea {...g("criterion-description")} value={c.description} disabled={!editable} onChange={(e) => updateCriterion(i, { description: e.target.value })} placeholder="Instruction for the LLM…" className="mt-2 bg-background border-border text-xs" rows={2} />
+                    <Textarea {...g("criterion-guidance")} value={c.guidance ?? ""} disabled={!editable} onChange={(e) => updateCriterion(i, { guidance: e.target.value || undefined })} placeholder="Optional extra guidance / examples for the auditor…" className="mt-2 bg-background border-border text-xs" rows={2} />
+                    <div {...g("criterion-critical")} className="mt-2 flex items-center gap-2">
                       <label className="font-mono text-[10px] text-muted-foreground">Critical override (&lt;)</label>
                       <Input type="number" value={c.critical_threshold ?? ""} disabled={!editable} onChange={(e) => updateCriterion(i, { critical_threshold: e.target.value === "" ? undefined : Number(e.target.value) })} placeholder="—" className={cn("bg-background border-border w-20 font-mono", critErr && "border-destructive focus-visible:ring-destructive")} />
                       <span className={cn("font-mono text-[10px]", critErr ? "text-destructive" : "text-muted-foreground/70")}>
@@ -235,13 +246,13 @@ export function AuditPromptsView({ user }: { user: User }) {
                 })}
               </div>
               {editable && (
-                <Button onClick={addCriterion} variant="ghost" className="mt-2 border border-border font-mono text-xs">
+                <Button data-guide="criteria-add" onClick={addCriterion} variant="ghost" className="mt-2 border border-border font-mono text-xs">
                   <Plus className="h-3.5 w-3.5 mr-1.5" /> Add Criterion
                 </Button>
               )}
             </div>
 
-            <div>
+            <div data-guide="rubric-system-prompt">
               <label className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">Base instruction for the LLM auditor</label>
               <Textarea value={draft.system_prompt} disabled={!editable} onChange={(e) => setDraft({ ...draft, system_prompt: e.target.value })} className="mt-1 font-mono text-xs bg-[#0D0D0D] border-border focus-visible:ring-primary min-h-[160px]" />
             </div>
@@ -259,14 +270,14 @@ export function AuditPromptsView({ user }: { user: User }) {
 
             {/* Per-team infrastructure — super_admin only. Blank = use the global env default. */}
             {isSuper && (
-              <div className="border border-border rounded-md p-4 bg-surface">
+              <div data-guide="infra-panel" className="border border-border rounded-md p-4 bg-surface">
                 <div className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground mb-1">Infrastructure (per-team)</div>
                 <p className="font-mono text-[10px] text-muted-foreground/70 mb-3">Leave a field blank to use the global default. Set these to onboard a team with its own bucket/queues.</p>
                 <div className="grid grid-cols-2 gap-3">
                   {INFRA_FIELDS.map((f) => {
                     const val = (draft.infra ?? {})[f.key];
                     return (
-                      <div key={f.key} className={f.numeric ? "" : "col-span-2"}>
+                      <div key={f.key} data-guide={`infra-${f.key}`} className={f.numeric ? "" : "col-span-2"}>
                         <label className="font-mono text-[10px] text-muted-foreground">{f.label}</label>
                         <Input
                           type={f.numeric ? "number" : "text"}
@@ -281,7 +292,7 @@ export function AuditPromptsView({ user }: { user: User }) {
                     );
                   })}
                 </div>
-                <label className="mt-3 flex items-center gap-2 font-mono text-[10px] text-muted-foreground">
+                <label data-guide="infra-active" className="mt-3 flex items-center gap-2 font-mono text-[10px] text-muted-foreground">
                   <input type="checkbox" checked={draft.active !== false} onChange={(e) => setDraft({ ...draft, active: e.target.checked })} />
                   Team active (workers poll its queue)
                 </label>
@@ -289,11 +300,11 @@ export function AuditPromptsView({ user }: { user: User }) {
             )}
 
             {editable && (
-              <div className="flex gap-2 sticky bottom-0 bg-background py-3 border-t border-border">
+              <div data-guide="rubric-save" className="flex gap-2 sticky bottom-0 bg-background py-3 border-t border-border">
                 <Button onClick={() => saveMut.mutate(draft)} disabled={saveMut.isPending || hasCriterionErrors} className="bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-40">
                   {saveMut.isPending ? "Saving…" : "Save Changes"}
                 </Button>
-                <Button variant="ghost" onClick={() => selected && setDraft(selected)} className="border border-border">Discard</Button>
+                <Button data-guide="rubric-discard" variant="ghost" onClick={() => selected && setDraft(selected)} className="border border-border">Discard</Button>
                 {hasCriterionErrors && <span className="self-center font-mono text-[10px] text-destructive">Fix critical overrides (must be &lt; weight) to save.</span>}
               </div>
             )}
@@ -324,6 +335,10 @@ function SuggestionsPanel({
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const [rubricId, setRubricId] = useState("primary");
+
+  // This panel is collapsed by default, so its contents aren't in the DOM for a
+  // tour to point at. Expand on request.
+  useEffect(() => onGuideSignal((s) => { if (s === "expand-suggestions") setOpen(true); }), []);
 
   const { data: suggestions = [] } = useQuery<RubricSuggestion[]>({
     queryKey: ["suggestions", teamId],
@@ -365,8 +380,8 @@ function SuggestionsPanel({
   if (!canEdit) return null;
 
   return (
-    <div className="border border-border rounded-md p-4 bg-surface">
-      <button onClick={() => setOpen((o) => !o)} className="flex items-center gap-2 w-full text-left">
+    <div data-guide="suggestions-panel" className="border border-border rounded-md p-4 bg-surface">
+      <button data-guide="suggestions-toggle" onClick={() => setOpen((o) => !o)} className="flex items-center gap-2 w-full text-left">
         {open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
         <Lightbulb className="h-4 w-4 text-[color:var(--oorp)]" />
         <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">Improvement Suggestions</span>
@@ -378,7 +393,7 @@ function SuggestionsPanel({
             Generates rubric edits from reviewer feedback on this team's audits (AI score vs. human correction).
           </p>
           <div className="flex items-end gap-2">
-            <div className="flex-1">
+            <div data-guide="suggestions-select" className="flex-1">
               <label className="font-mono text-[10px] text-muted-foreground">Rubric to analyze</label>
               <Select value={rubricId} onValueChange={setRubricId}>
                 <SelectTrigger className="mt-1 h-8 bg-background border-border text-xs"><SelectValue /></SelectTrigger>
@@ -387,7 +402,7 @@ function SuggestionsPanel({
                 </SelectContent>
               </Select>
             </div>
-            <Button onClick={() => generate.mutate()} disabled={generate.isPending} className="h-8 text-xs bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50">
+            <Button data-guide="suggestions-generate" onClick={() => generate.mutate()} disabled={generate.isPending} className="h-8 text-xs bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50">
               <Sparkles className={cn("h-3.5 w-3.5 mr-1", generate.isPending && "animate-pulse")} />
               {generate.isPending ? "Analyzing…" : "Generate"}
             </Button>
@@ -398,8 +413,8 @@ function SuggestionsPanel({
             <p className="text-xs text-muted-foreground">No suggestions yet. Collect reviewer feedback on calls, then generate.</p>
           ) : (
             <ul className="space-y-3">
-              {suggestions.map((s) => (
-                <li key={s.suggestion_id} className={cn("border rounded-md p-3 bg-background space-y-2", s.status === "applied" ? "border-emerald-500/30" : s.status === "dismissed" ? "border-border opacity-60" : "border-[color:var(--oorp)]/30")}>
+              {suggestions.map((s, si) => (
+                <li key={s.suggestion_id} {...(si === 0 ? { "data-guide": "suggestion-card" } : {})} className={cn("border rounded-md p-3 bg-background space-y-2", s.status === "applied" ? "border-emerald-500/30" : s.status === "dismissed" ? "border-border opacity-60" : "border-[color:var(--oorp)]/30")}>
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-semibold">{s.rubric_name}</span>
                     <span className="font-mono text-[9px] uppercase px-1.5 py-0.5 border border-border text-muted-foreground rounded-sm">{s.status}</span>
@@ -457,6 +472,14 @@ function RubricsManager({ teamId, canEdit }: { teamId: Team; canEdit: boolean })
   const [openId, setOpenId] = useState<string | null>(null);
   const invalidate = () => qc.invalidateQueries({ queryKey: ["rubrics", teamId] });
 
+  // A rubric's fields only mount when its row is expanded. Open the first one so
+  // a tour can walk them; harmless when the team has no additional rubrics.
+  const firstId = rubrics[0]?.rubric_id;
+  useEffect(
+    () => onGuideSignal((s) => { if (s === "expand-first-rubric" && firstId) setOpenId(firstId); }),
+    [firstId]
+  );
+
   const addMut = useMutation({
     mutationFn: () =>
       createRubric({
@@ -480,14 +503,15 @@ function RubricsManager({ teamId, canEdit }: { teamId: Team; canEdit: boolean })
   if (!canEdit) return null;
 
   return (
-    <div className="border border-border rounded-md p-4 bg-surface">
+    <div data-guide="additional-rubrics" className="border border-border rounded-md p-4 bg-surface">
       <div className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground mb-1">Additional Rubrics</div>
       <p className="font-mono text-[10px] text-muted-foreground/70 mb-3">Each call is scored against the primary rubric above + every active rubric here. A call is flagged if any rubric flags it.</p>
 
       <div className="space-y-2">
-        {rubrics.map((r) => (
+        {rubrics.map((r, ri) => (
           <RubricRow
             key={r.rubric_id}
+            first={ri === 0}
             rubric={r}
             open={openId === r.rubric_id}
             onToggle={() => setOpenId(openId === r.rubric_id ? null : r.rubric_id)}
@@ -499,9 +523,9 @@ function RubricsManager({ teamId, canEdit }: { teamId: Team; canEdit: boolean })
         {rubrics.length === 0 && <div className="font-mono text-[11px] text-muted-foreground/60">No additional rubrics yet.</div>}
       </div>
 
-      <div className="flex gap-2 mt-3">
+      <div data-guide="additional-rubrics-new-name" className="flex gap-2 mt-3">
         <Input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="New rubric name (e.g. False Promises)" className="bg-background border-border text-xs h-8" />
-        <Button onClick={() => addMut.mutate()} disabled={!newName.trim() || addMut.isPending} className="h-8 bg-primary text-primary-foreground hover:bg-primary/90 text-xs">
+        <Button data-guide="additional-rubrics-add" onClick={() => addMut.mutate()} disabled={!newName.trim() || addMut.isPending} className="h-8 bg-primary text-primary-foreground hover:bg-primary/90 text-xs">
           <Plus className="h-3.5 w-3.5 mr-1" /> Add
         </Button>
       </div>
@@ -510,31 +534,36 @@ function RubricsManager({ teamId, canEdit }: { teamId: Team; canEdit: boolean })
 }
 
 function RubricRow({
-  rubric, open, onToggle, onSave, onDelete, onActive,
+  rubric, open, onToggle, onSave, onDelete, onActive, first,
 }: {
   rubric: Rubric; open: boolean; onToggle: () => void;
   onSave: (r: Rubric) => void; onDelete: () => void; onActive: (active: boolean) => void;
+  /** Only the first row carries guide anchors, as the tour's example. */
+  first?: boolean;
 }) {
+  const g = (name: string) => (first ? { "data-guide": name } : {});
   const [draft, setDraft] = useState<Rubric>(rubric);
   useEffect(() => setDraft(rubric), [rubric]);
   const setC = (i: number, patch: Partial<Criterion>) =>
     setDraft({ ...draft, criteria: draft.criteria.map((c, idx) => (idx === i ? { ...c, ...patch } : c)) });
 
   return (
-    <div className="border border-border rounded-md bg-background">
+    <div {...g("additional-rubrics-row")} className="border border-border rounded-md bg-background">
       <div className="flex items-center gap-2 px-3 py-2">
-        <button onClick={onToggle} className="text-muted-foreground hover:text-foreground">
+        <button {...g("additional-rubric-toggle")} onClick={onToggle} className="text-muted-foreground hover:text-foreground">
           {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
         </button>
         <span className="text-sm flex-1">{rubric.name}</span>
         <span className="font-mono text-[10px] text-muted-foreground">{rubric.criteria.length} criteria</span>
-        <Switch checked={rubric.active} onCheckedChange={onActive} />
-        <button onClick={onDelete} aria-label="Delete rubric" className="p-1.5 rounded-sm hover:bg-destructive/10 text-muted-foreground hover:text-destructive">
+        <span {...g("additional-rubric-active")} className="inline-flex">
+          <Switch checked={rubric.active} onCheckedChange={onActive} />
+        </span>
+        <button {...g("additional-rubric-delete")} onClick={onDelete} aria-label="Delete rubric" className="p-1.5 rounded-sm hover:bg-destructive/10 text-muted-foreground hover:text-destructive">
           <Trash2 className="h-3.5 w-3.5" />
         </button>
       </div>
       {open && (
-        <div className="px-3 pb-3 space-y-2 border-t border-border pt-2">
+        <div {...g("additional-rubric-fields")} className="px-3 pb-3 space-y-2 border-t border-border pt-2">
           <Input value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} className="bg-surface border-border text-xs" placeholder="Rubric name" />
           <div className="flex gap-2">
             <Input type="number" value={draft.flag_threshold} onChange={(e) => setDraft({ ...draft, flag_threshold: Number(e.target.value) })} className="bg-surface border-border font-mono text-xs w-24" placeholder="flag <" />

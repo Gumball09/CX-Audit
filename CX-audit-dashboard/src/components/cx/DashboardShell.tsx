@@ -12,8 +12,9 @@ import { BulkRunView } from "./BulkRunView";
 import { SettingsView } from "./SettingsView";
 import { fetchUsers } from "@/lib/api";
 import { cn } from "@/lib/utils";
-
-type View = "calls" | "performance" | "users" | "teams" | "patterns" | "bulk" | "signins" | "settings";
+import { GuideMenu } from "./GuideMenu";
+import { GuideTour } from "./GuideTour";
+import type { Guide, GuideRole, View } from "@/lib/guides";
 
 const VIEW_LABELS: Record<View, string> = {
   calls: "Call Audits",
@@ -30,6 +31,10 @@ export function DashboardShell({ user, onLogout }: { user: User; onLogout: () =>
   const [view, setView] = useState<View>("calls");
   const admin = canSeeAdmin(user.role);
   const superAdmin = user.role === "super_admin";
+
+  // The shell hosts the tour because it owns `view` — a guide step can name a
+  // destination and the engine switches to it before spotlighting the anchor.
+  const [tour, setTour] = useState<Guide | null>(null);
 
   // A small users lookup so audits can show agent names. Admin+ only; the
   // backend scopes this to the caller's team automatically.
@@ -66,6 +71,7 @@ export function DashboardShell({ user, onLogout }: { user: User; onLogout: () =>
             return (
               <button
                 key={n.id}
+                data-guide={`nav-${n.id}`}
                 onClick={() => setView(n.id)}
                 aria-label={n.label}
                 className={cn(
@@ -90,6 +96,7 @@ export function DashboardShell({ user, onLogout }: { user: User; onLogout: () =>
         <header className="h-14 border-b border-border flex items-center justify-between px-6 bg-background">
           <h1 className="text-lg font-bold">{VIEW_LABELS[view]}</h1>
           <div className="flex items-center gap-3">
+            <GuideMenu role={user.role as GuideRole} onStart={setTour} />
             <span className="text-sm text-foreground">{user.name}</span>
             <span className={cn("font-mono text-[10px] uppercase tracking-wider px-2 py-0.5 border rounded-sm inline-flex items-center gap-1", roleClass(user.role))}>
               {user.role === "super_admin" && <Crown className="h-3 w-3" />}
@@ -116,6 +123,16 @@ export function DashboardShell({ user, onLogout }: { user: User; onLogout: () =>
           {view === "settings" && superAdmin && <SettingsView user={user} />}
         </main>
       </div>
+
+      {tour && (
+        <GuideTour
+          guide={tour}
+          role={user.role as GuideRole}
+          currentView={view}
+          onNavigate={setView}
+          onClose={() => setTour(null)}
+        />
+      )}
     </div>
   );
 }
