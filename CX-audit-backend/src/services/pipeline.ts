@@ -10,6 +10,7 @@ import {
 } from "../lib/s3.js";
 import { sendMessage, type Heartbeat } from "../lib/sqs.js";
 import { probeBufferDurationSec } from "../lib/audio.js";
+import { normalizeTerms, substitutionCount } from "../lib/glossary.js";
 import { transcribeCall, auditTranscript } from "./ai/index.js";
 // Imported from the contract module rather than the dispatcher so an `instanceof`
 // check still works when tests mock the dispatcher.
@@ -176,6 +177,27 @@ export async function processTranscription(
       // Stay owner of the SQS message while a batch job runs for minutes.
       onProgress: heartbeat ? () => heartbeat(VISIBILITY_EXTENSION_SEC) : undefined,
     });
+
+    // Fix known brand-term mis-hearings before anything reads the transcript. On
+    // 8 kHz audio "Scaler" never survives ASR — it comes back as Eskillo, Skillo or
+    // SKL — and the rubric asks whether the agent gave the standard brand greeting,
+    // so without this the auditor penalises a greeting the agent got right.
+    // Provider-agnostic on purpose: the OpenAI path transcribes the same audio and
+    // has the same problem. Substitutions are logged rather than applied silently,
+    // because this edits an artifact a score may later be defended with.
+    const fixedText = normalizeTerms(result.text);
+    if (substitutionCount(fixedText.substitutions) > 0) {
+      logger.info(
+        `${auditId}: normalised brand terms in transcript — ` +
+          Object.entries(fixedText.substitutions).map(([k, n]) => `${k} x${n}`).join(", ")
+      );
+    }
+    result = {
+      ...result,
+      text: fixedText.text,
+      turns: result.turns.map((t) => ({ ...t, text: normalizeTerms(t.text).text })),
+    };
+
     transcriptionKey = await saveTranscription(result.text, auditId, infra.output_bucket);
     // Sibling artifact with the diarized turns. The .txt above stays the audit
     // input and what the dashboard renders, so nothing downstream has to change.

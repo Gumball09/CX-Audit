@@ -413,3 +413,40 @@ describe("empty transcripts are never scored", () => {
     expect(m.auditTranscript).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * The brand fix has to happen in the pipeline, not just in the glossary unit — the
+ * transcript that reaches S3 and the auditor is what matters.
+ */
+describe("brand-term normalisation reaches the stored transcript", () => {
+  it("rewrites the company name in both the .txt and the diarized turns", async () => {
+    m.transcribeCall.mockResolvedValue({
+      text: "AGENT: Hi, this is Shabaz here from Eskillo. Mail update@skla.com\nCUSTOMER: ok",
+      turns: [
+        { speaker_id: "0", role: "agent", start_sec: 0, end_sec: 5, text: "Hi, this is Shabaz here from Eskillo." },
+        { speaker_id: "1", role: "customer", start_sec: 5, end_sec: 6, text: "ok" },
+      ],
+      roles: { agent: "0", customer: "1", confidence: 0.9, method: "llm" },
+      talkTimeSec: { agent: 5, customer: 1 },
+      languageCode: "en-IN",
+      jobId: "job-brand",
+    });
+
+    await processTranscription(KEY, null);
+
+    const storedText = m.saveTranscription.mock.calls[0][0];
+    expect(storedText).toContain("from Scaler.");
+    expect(storedText).toContain("update@scaler.com");
+    expect(storedText).not.toMatch(/Eskillo|skla\.com/);
+
+    // The diarized sibling must agree with the .txt, or a reviewer comparing the
+    // two artifacts sees a discrepancy we cannot explain.
+    const structured = m.saveTranscriptStructured.mock.calls[0][0];
+    expect(structured.turns[0].text).toBe("Hi, this is Shabaz here from Scaler.");
+  });
+
+  it("leaves a transcript with nothing to fix byte-identical", async () => {
+    await processTranscription(KEY, null);
+    expect(m.saveTranscription.mock.calls[0][0]).toBe("AGENT: hi\nCUSTOMER: hello");
+  });
+});
